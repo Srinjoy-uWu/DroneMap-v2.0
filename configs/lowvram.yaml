@@ -1,0 +1,36 @@
+# Profile for the RTX 3050 Laptop (6 GB VRAM, 16 GB RAM, ~49 GB free disk).
+#
+# This is the profile that actually gets used on the dev laptop:
+#   dronemap run --profile lowvram --video flight.mp4
+#
+# Every value here trades output resolution for headroom. The binding constraints
+# are RAM during OpenMVS densification and disk for the intermediates - not VRAM,
+# which only SIFT extraction and YOLO touch.
+
+min_free_disk_gb: 25.0
+purge_intermediates: true
+
+frames:
+  max_long_edge: 1600
+  max_keyframes: 400
+
+pose:
+  max_num_features: 12288
+  sequential_overlap: 8
+  init_min_tri_angle: 1.5
+
+dense:
+  # DensifyPointCloud peak RAM scales with resolution; level 2 quarters the
+  # working images and is the difference between finishing and swapping.
+  resolution_level: 2
+  max_resolution: 1600
+  number_views: 5
+  number_views_fuse: 3
+
+mesh:
+  # RefineMesh is the single slowest step in the pipeline and is a quality
+  # refinement, not a correctness requirement. Off by default here; turn it on
+  # for the final demo asset once the pipeline is known good:
+  #   --profile lowvram --set mesh.refine=true
+  refine: false
+  texture_size: 4096

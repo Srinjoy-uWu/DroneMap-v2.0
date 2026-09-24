@@ -1,0 +1,103 @@
+# dronemap default configuration
+#
+# This file is layer 2 of 5 (model defaults -> THIS -> --profile -> DRONEMAP_* env
+# -> --set key=value). It is deliberately near-empty: the authoritative defaults
+# live in src/dronemap/config.py, where they sit next to the comment explaining
+# why each value is what it is. Duplicating them here would mean editing a
+# default in Python has no effect, which is a nasty way to lose an afternoon.
+#
+# Uncomment a key to override the coded default. The full surface is listed below
+# for discoverability.
+
+# --- paths -------------------------------------------------------------------
+# data_root: D:/dronemap-data      # move runs to an external drive
+# tools_root: C:/tools
+# colmap_bin: C:/tools/colmap/colmap.exe
+# openmvs_dir: C:/tools/openmvs
+# ffmpeg_bin:                      # empty -> use the bundled imageio-ffmpeg binary
+# blender_bin:
+
+purge_intermediates: false
+min_free_disk_gb: 20.0
+
+# --- stage 1: keyframes ------------------------------------------------------
+# frames:
+#   max_long_edge: 1920
+#   jpeg_quality: 95
+#   max_keyframes: 600
+#   sharpness_window: 8
+#   target_overlap: 0.75           # forward overlap between consecutive keyframes
+#   min_frame_stride: 2
+#   max_frame_stride: 120
+#   min_sharpness_ratio: 0.35
+#   clahe: false
+#   clahe_clip: 2.0
+
+# --- stage 2: dynamic masking ------------------------------------------------
+# masks:
+#   enabled: true
+#   backend: yolo                  # yolo | sam2 | none
+#   model: yolov8s-seg.pt
+#   conf: 0.25
+#   dilate_px: 12
+#   device: auto
+#   max_masked_fraction: 0.6
+
+# --- stage 3a: pose ----------------------------------------------------------
+# pose:
+#   camera_model: OPENCV
+#   single_camera: true
+#   use_gpu: true
+#   max_num_features: 16384
+#   matcher: sequential            # sequential | exhaustive | vocab_tree
+#   sequential_overlap: 10
+#   quadratic_overlap: true
+#   loop_detection: true
+#   init_min_tri_angle: 4.0        # relaxed; a single pass has narrow baselines
+#   min_registered_fraction: 0.60
+#   escalate_on_failure: true
+
+# --- stage 3b: georeferencing ------------------------------------------------
+# georef:
+#   method: auto                   # auto | pose_prior | aligner | none
+#   gnss_std_xy: 2.5               # metres, 1-sigma. RTK/PPK: ~0.02 / ~0.03
+#   gnss_std_z: 5.0
+#   alignment_max_error: 3.0
+#   lever_arm: [0.0, 0.0, 0.0]     # camera relative to GNSS antenna, body frame
+#   time_offset_s: 0.0             # camera clock minus GNSS clock
+#   target_crs: auto               # auto -> UTM zone of the first fix
+
+# --- stages 5 and 6: dense cloud and mesh ------------------------------------
+# dense:
+#   resolution_level: 1            # 0 = full res; 1 halves it
+#   max_resolution: 1920
+#   number_views: 6
+#   number_views_fuse: 3
+# mesh:
+#   refine: true                   # RefineMesh is the slowest step by far
+#   min_point_distance: 2.5
+#   decimate: 1.0
+#   texture_size: 8192
+
+# --- stage 4b: semantics -----------------------------------------------------
+# semantics:
+#   enabled: false
+#   model: nvidia/segformer-b0-finetuned-ade-512-512
+#   checkpoint_domain_verified: false   # must be true before enabling; an
+#                                      # ADE/Cityscapes checkpoint is street-level
+#                                      # and does not transfer to nadir aerial
+
+# --- stage 7: exports --------------------------------------------------------
+# export:
+#   raster_gsd: auto
+#   dsm: true
+#   dtm: true
+#   orthomosaic: true
+#   point_cloud_laz: true
+#   mesh_glb: true
+
+# --- chunking (near-real-time tier) ------------------------------------------
+# chunks:
+#   enabled: false
+#   size: 150
+#   overlap: 20

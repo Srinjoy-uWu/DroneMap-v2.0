@@ -1,0 +1,69 @@
+# dronemap stretch configuration
+#
+# Enables all stretch-path components that run on the local RTX 3050 6 GB machine.
+# Compute-heavy steps (3DGS on Nerfstudio) are run on Kaggle — see
+# notebooks/sih26158_3dgs_kaggle.ipynb for the Kaggle workflow.
+#
+# Usage:
+#   dronemap run --video flight.mp4 --profile stretch --run-id demo_stretch
+#
+# This profile stacks on top of default.yaml. All defaults still apply unless
+# explicitly overridden here.
+
+# --- Stage 3a: SfM backend ---------------------------------------------------
+# Switch to MASt3R for better single-pass / low-overlap registration.
+# Remove or set to "colmap" to use the Core path.
+pose:
+  backend: mast3r
+  mast3r_batch_size: 80       # max images per batch; 80 fits in 6 GB VRAM
+  mast3r_niter: 300
+  mast3r_min_conf: 3.0
+
+# --- Stage 4a: Monocular metric depth ----------------------------------------
+depth:
+  enabled: true
+  backend: depth_anything     # "depth_anything" (fast) | "metric3d" (accurate)
+  depth_anything_model: small # "small" < 1 GB VRAM; "base" ~2 GB; "large" ~3 GB
+  stride: 5                   # run depth on every 5th keyframe
+  save_depth_png: true
+
+# --- Stage 3b: Georeferencing ------------------------------------------------
+# pose_prior_mapper gives better metric accuracy than model_aligner.
+# auto tries pose_prior first; falls back to model_aligner if not available.
+georef:
+  method: auto
+  gnss_std_xy: 2.5
+  gnss_std_z: 5.0
+  alignment_max_error: 3.0
+
+# --- Stage 5/6: Dense cloud and mesh -----------------------------------------
+# Higher quality settings (slower).
+dense:
+  resolution_level: 0         # full resolution
+  max_resolution: 3840
+  number_views: 8
+  number_views_fuse: 4
+
+mesh:
+  refine: true                # RefineMesh: slower but better detail
+  refine_max_views: 8
+  texture_size: 8192
+
+# --- Stage 4b: Semantics (still disabled until aerial checkpoint verified) ----
+# semantics:
+#   enabled: true
+#   checkpoint_domain_verified: true   # only after you've validated on UAVid
+#   model: some/aerial-segformer
+
+# --- Exports -----------------------------------------------------------------
+export:
+  dsm: true
+  dtm: true
+  orthomosaic: true
+  point_cloud_laz: true
+  mesh_glb: true
+  cloud_voxel_size: 0.05      # 5 cm voxel downsample in LAZ export
+
+# --- System ------------------------------------------------------------------
+min_free_disk_gb: 30.0        # stretch run needs more space (full-res dense)
+purge_intermediates: false    # keep everything for debugging on first run

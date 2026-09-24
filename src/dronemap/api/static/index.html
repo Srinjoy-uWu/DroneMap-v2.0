@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DroneMap — Video to 3D Map</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Three.js Import Map (Must be in head before any script execution) -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three":         "/vendor/three/three.module.js",
+      "three/addons/": "/vendor/three/addons/"
+    }
+  }
+  </script>
+
+  <!-- Viewer bootstrap watchdog.
+       A classic inline script, so it runs even when the ES module below fails
+       to load. Without it, any failure inside viewer.js (a bad import map, a
+       missing vendor file, a WebGL context refusal) leaves the neutral
+       "No Project Selected" card on screen forever and the user cannot tell
+       a broken viewer from an unselected project. -->
+  <script>
+  (function () {
+    window.__dronemapViewerErrors = [];
+
+    function showViewerFailure(detail) {
+      var overlay = document.getElementById('status-overlay');
+      if (!overlay) return;
+      overlay.style.display = 'block';
+      overlay.innerHTML =
+        '<div class="status-card">' +
+        '<div class="status-title" style="color:#f87171">3D viewer failed to start</div>' +
+        '<div class="status-desc">The model file may be fine — the in-browser 3D engine did not initialise.' +
+        '<br><br><strong>Reason:</strong> ' + detail +
+        '<br><br>Try a hard reload (<strong>Ctrl+Shift+R</strong>). If it persists, the browser may not' +
+        ' support WebGL, or a vendored Three.js file is missing from <code>static/vendor/three/</code>.' +
+        '</div></div>';
+    }
+    window.__dronemapShowViewerFailure = showViewerFailure;
+
+    window.addEventListener('error', function (e) {
+      var src = (e.target && (e.target.src || e.target.href)) || '';
+      if (src) {
+        window.__dronemapViewerErrors.push('Failed to load resource: ' + src);
+      } else if (e.message) {
+        window.__dronemapViewerErrors.push(e.message);
+      }
+    }, true);
+
+    window.addEventListener('unhandledrejection', function (e) {
+      window.__dronemapViewerErrors.push(
+        'Unhandled promise rejection: ' + ((e.reason && e.reason.message) || e.reason)
+      );
+    });
+
+    // Module scripts are deferred, so they finish before DOMContentLoaded.
+    // Give them a generous margin: large GLBs (7-8 MB) can take several
+    // seconds to stream over localhost, so 4 s triggered false failures.
+    window.addEventListener('DOMContentLoaded', function () {
+      setTimeout(function () {
+        if (window.viewerReady) return;
+        var errs = window.__dronemapViewerErrors;
+        showViewerFailure(
+          errs.length
+            ? errs.slice(0, 3).join('<br>')
+            : 'The viewer module did not signal readiness. This is usually a stale' +
+              ' cached copy of index.html still pointing at an unreachable CDN.'
+        );
+      }, 8000);
+    });
+  })();
+  </script>
+</head>
+<body>
+  <!-- ====================================================================
+       Sidebar: Project Selector, Details & Downloads
+  ===================================================================== -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">
+        <div class="brand-title">DroneMap 3D</div>
+        <div class="brand-subtitle">Drone Video to 3D Reconstruction</div>
+      </div>
+    </div>
+
+    <!-- Primary Action -->
+    <div class="action-container">
+      <button id="btn-open-upload" class="btn-primary-action">
+        <span class="btn-text">+ Process Drone Video</span>
+      </button>
+    </div>
+
+    <!-- Projects List Section -->
+    <div class="sidebar-section">
+      <div class="section-header">
+        <span class="section-title">Saved Projects</span>
+        <button id="btn-refresh-runs" class="btn-text-tiny" title="Refresh project list">Refresh</button>
+      </div>
+      <div id="run-list" class="custom-scroll">
+        <div class="loading-runs">Loading projects…</div>
+      </div>
+    </div>
+
+    <!-- Details Section -->
+    <div class="sidebar-section" id="report-section" style="display:none">
+      <div class="section-header">
+        <span class="section-title">Project Summary</span>
+      </div>
+      <div id="accuracy-report" class="report-container"></div>
+    </div>
+
+    <!-- Downloads Section -->
+    <div class="sidebar-section" id="download-section" style="display:none">
+      <div class="section-header">
+        <span class="section-title">Download Files</span>
+      </div>
+      <div id="download-links" class="downloads-grid"></div>
+    </div>
+  </aside>
+
+  <!-- ====================================================================
+       Main 3D Viewport
+  ===================================================================== -->
+  <main id="viewport">
+    <canvas id="three-canvas"></canvas>
+
+    <!-- Top Header Bar -->
+    <header id="top-bar">
+      <div class="active-project-info">
+        <span class="status-indicator"></span>
+        <span id="active-project-name" class="project-title">No Project Loaded</span>
+      </div>
+      <div class="top-bar-actions">
+        <div id="measure-pill" class="pill" style="display:none">
+          <span id="measure-pill-text">Click two points to measure distance</span>
+        </div>
+        <button id="btn-toggle-audit" class="tool-btn" title="View Stage-by-Stage Quality & Hardening Audit">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+          Audit Drawer
+        </button>
+        <button id="btn-toggle-copilot" class="tool-btn tool-btn-primary" title="Open AI 3D Spatial Copilot">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+          AI Copilot
+        </button>
+      </div>
+    </header>
+
+    <!-- HUD Center Status -->
+    <div id="status-overlay">
+      <div class="status-card">
+        <div class="status-title">No Project Selected</div>
+        <div class="status-desc">Select a project on the left or click <strong>+ Process Drone Video</strong> to upload a video.</div>
+      </div>
+    </div>
+
+    <!-- Measurement Floating Card -->
+    <div id="measure-result" class="floating-card" style="display:none">
+      <div class="card-header">
+        <span class="card-title">Measurement</span>
+        <button id="btn-close-measure" class="btn-close-tiny">&times;</button>
+      </div>
+      <div class="measure-metrics">
+        <div class="metric-row main-metric">
+          <span class="metric-label">Direct Distance</span>
+          <span class="metric-val" id="val-3d-dist">0.00 m</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Horizontal Distance</span>
+          <span class="metric-val" id="val-horiz-dist">0.00 m</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Height Difference</span>
+          <span class="metric-val" id="val-vert-dist">0.00 m</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Direction</span>
+          <span class="metric-val" id="val-bearing">0.0&deg;</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Viewport Bottom Control Toolbar -->
+    <nav id="toolbar">
+      <div class="toolbar-group">
+        <button id="btn-orbit" class="tool-btn active" title="Rotate and move the model">
+          Orbit
+        </button>
+        <button id="btn-measure" class="tool-btn" title="Measure distances">
+          Measure
+        </button>
+        <button id="btn-reset" class="tool-btn" title="Reset camera view">
+          Fit View
+        </button>
+      </div>
+
+      <div class="toolbar-divider"></div>
+
+      <div class="toolbar-group">
+        <button id="btn-shade-textured" class="tool-btn active" title="Show photo textures">
+          Textured
+        </button>
+        <button id="btn-shade-white" class="tool-btn" title="Show clean white surface">
+          Clay Mode
+        </button>
+      </div>
+
+      <div class="toolbar-divider"></div>
+
+      <!-- Shown only when stage 6 produced two texture variants for this run.
+           Same geometry, different atlas: one blended with OpenMVS seam
+           levelling, one without it. -->
+      <div class="toolbar-group" id="grp-texture-variant" style="display:none">
+        <button id="btn-variant-primary" class="tool-btn active" title="The texture variant the pipeline measured as better">
+          Texture A
+        </button>
+        <button id="btn-variant-alt" class="tool-btn" title="The other texture variant, kept for comparison">
+          Texture B
+        </button>
+      </div>
+
+      <div class="toolbar-divider" id="div-texture-variant" style="display:none"></div>
+
+      <div class="toolbar-group">
+        <label class="toolbar-toggle" title="Show 3D mesh lines">
+          <input type="checkbox" id="chk-wireframe" />
+          <span class="toggle-switch"></span>
+          <span class="toggle-text">Wireframe</span>
+        </label>
+        <label class="toolbar-toggle" title="Rotate automatically">
+          <input type="checkbox" id="chk-autorotate" />
+          <span class="toggle-switch"></span>
+          <span class="toggle-text">Auto Rotate</span>
+        </label>
+      </div>
+    </nav>
+
+    <!-- Audit & Transparency Drawer -->
+    <aside id="audit-drawer" class="sliding-drawer" style="display:none">
+      <div class="drawer-header">
+        <div class="drawer-title">
+          <span>Quality &amp; Hardening Audit</span>
+          <span id="audit-health-badge" class="badge-tag">HEALTHY</span>
+        </div>
+        <button id="btn-close-audit" class="btn-close-tiny">&times;</button>
+      </div>
+      <div class="drawer-body custom-scroll">
+        <!-- Self-Healing Diagnostics Summary -->
+        <div class="audit-card">
+          <div class="audit-card-title">Self-Healing Diagnostics</div>
+          <div id="audit-diag-summary" class="audit-text">No diagnostics data loaded.</div>
+          <div id="audit-tuning-actions" class="audit-actions-list"></div>
+        </div>
+
+        <!-- Stage 1 -->
+        <div class="audit-card">
+          <div class="audit-card-title">Stage 1: Multi-Factor Frame Scoring</div>
+          <div class="audit-metric-row">
+            <span>Decoded Frames:</span> <strong id="audit-s1-decoded">-</strong>
+          </div>
+          <div class="audit-metric-row">
+            <span>Optimized Keyframes:</span> <strong id="audit-s1-keyframes">-</strong>
+          </div>
+          <div class="audit-metric-row">
+            <span>Decimation Efficiency:</span> <strong id="audit-s1-reduction" style="color:#3fb950">-</strong>
+          </div>
+        </div>
+
+        <!-- Stage 2 -->
+        <div class="audit-card">
+          <div class="audit-card-title">Stage 2: Dynamic Object Elimination</div>
+          <div class="audit-metric-row">
+            <span>Velocity Dilation:</span> <strong>Active (r = 12 + 0.5·||v||)</strong>
+          </div>
+          <div class="audit-metric-row">
+            <span>Mean Masked Area:</span> <strong id="audit-s2-masked">-</strong>
+          </div>
+          <div id="audit-s2-preview-container" style="margin-top:8px;display:none;">
+            <div style="font-size:0.75rem;color:var(--text-dim);margin-bottom:4px;">Before / After Dynamic Mask Overlay:</div>
+            <img id="audit-s2-preview-img" style="width:100%;border-radius:4px;border:1px solid var(--border);" src="" alt="Dynamic mask overlay" />
+          </div>
+        </div>
+
+        <!-- Stage 3 -->
+        <div class="audit-card">
+          <div class="audit-card-title">Stage 3: Hybrid Neural Feature Matching</div>
+          <div class="audit-metric-row">
+            <span>Matching Mode:</span> <strong id="audit-s3-mode">Classical Guided SIFT</strong>
+          </div>
+          <div class="audit-metric-row">
+            <span>Registered Keyframes:</span> <strong id="audit-s3-registered">-</strong>
+          </div>
+          <div class="audit-metric-row">
+            <span>Reprojection Error:</span> <strong id="audit-s3-reproj">-</strong>
+          </div>
+        </div>
+
+        <!-- Stage 5 & 6 -->
+        <div class="audit-card">
+          <div class="audit-card-title">Stage 5 &amp; 6: Watertight Mesh Surface</div>
+          <div class="audit-metric-row">
+            <span>Dense Point Cloud:</span> <strong id="audit-s5-pts">-</strong>
+          </div>
+          <div class="audit-metric-row">
+            <span>Mesh Surface Faces:</span> <strong id="audit-s6-faces">-</strong>
+          </div>
+          <div class="audit-metric-row">
+            <span>Topology Guarantee:</span> <strong style="color:#3fb950">0 Non-Manifold Edges</strong>
+          </div>
+        </div>
+
+        <!-- Stage 7 -->
+        <div class="audit-card">
+          <div class="audit-card-title">Stage 7: 3D Regional Confidence Tiers</div>
+          <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;margin:8px 0;background:#21262d;">
+            <div id="audit-conf-obs-bar" style="width:75%;background:#2ea043;"></div>
+            <div id="audit-conf-est-bar" style="width:18%;background:#d29922;"></div>
+            <div id="audit-conf-inf-bar" style="width:7%;background:#f85149;"></div>
+          </div>
+          <div style="font-size:0.75rem;display:flex;justify-content:space-between;color:var(--text-dim);">
+            <span>Obs: <strong id="audit-conf-obs" style="color:#2ea043">75%</strong></span>
+            <span>Est: <strong id="audit-conf-est" style="color:#d29922">18%</strong></span>
+            <span>Inf: <strong id="audit-conf-inf" style="color:#f85149">7%</strong></span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- AI Copilot Chat Drawer -->
+    <aside id="copilot-drawer" class="sliding-drawer" style="display:none">
+      <div class="drawer-header">
+        <div class="drawer-title">
+          <span>AI 3D Spatial Copilot</span>
+          <span id="copilot-mode-badge" class="badge-tag">AI Booster</span>
+        </div>
+        <button id="btn-close-copilot" class="btn-close-tiny">&times;</button>
+      </div>
+
+      <div class="drawer-body custom-scroll" id="copilot-messages">
+        <div class="copilot-msg msg-ai">
+          <div class="msg-bubble">
+            Hello! I am your <strong>DroneMap 3D Copilot</strong>. I can query survey accuracy, calculate spatial distances, explain photogrammetry stages, or trigger 3D confidence heatmaps.
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Chips -->
+      <div class="copilot-chips">
+        <button class="chip" data-query="Show me 3D regional confidence tiers">Confidence Tiers</button>
+        <button class="chip" data-query="What is the ground sampling distance and resolution?">GSD &amp; Resolution</button>
+        <button class="chip" data-query="What dynamic objects were removed by velocity masking?">Dynamic Masks</button>
+        <button class="chip" data-query="What is the georeferencing accuracy and RMSE?">Accuracy &amp; RMSE</button>
+        <button class="chip" data-query="Explain Stage 3 camera pose and neural matching">Explain Stage 3</button>
+      </div>
+
+      <!-- Chat Input Area -->
+      <form id="copilot-form" class="copilot-input-area">
+        <input type="text" id="copilot-input" placeholder="Ask about this 3D model or survey..." autocomplete="off" />
+        <button type="submit" id="btn-copilot-send" class="btn-send" title="Send query">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+        </button>
+      </form>
+    </aside>
+  </main>
+
+  <!-- ====================================================================
+       Modal: Upload Drone Video & Start Reconstruction
+  ===================================================================== -->
+  <div id="upload-modal" class="modal-backdrop" style="display:none">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div>
+          <h3>Process Drone Video</h3>
+          <p>Convert your drone flight into a 3D model and elevation map.</p>
+        </div>
+        <button id="btn-modal-close" class="modal-close-btn">&times;</button>
+      </div>
+
+      <form id="upload-form" class="modal-body">
+        <!-- Video File Dropzone -->
+        <div class="form-group">
+          <label class="form-label">Drone Video <span class="required">*</span></label>
+          <div id="video-dropzone" class="dropzone">
+            <input type="file" id="video-file-input" name="video" accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,.mp4,.mov,.avi,.mkv" required />
+            <div class="dropzone-content">
+              <div class="drop-prompt">Choose or drag drone video file</div>
+              <div class="drop-hint">MP4 or MOV (4K / 1080p from any drone)</div>
+            </div>
+            <div id="video-file-info" class="file-info" style="display:none">
+              <span class="file-name"></span>
+              <span class="file-size"></span>
+              <button type="button" class="btn-clear-file">&times;</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Flight Telemetry / GPS Dropzone (Optional) -->
+        <div class="form-group">
+          <div class="label-with-toggle">
+            <label class="form-label">Flight GPS Log (Optional)</label>
+            <label class="checkbox-inline">
+              <input type="checkbox" id="chk-no-telemetry" name="no_telemetry" />
+              <span>No GPS file</span>
+            </label>
+          </div>
+          <div id="telem-dropzone" class="dropzone dropzone-secondary">
+            <input type="file" id="telem-file-input" name="telemetry" accept=".srt,.csv,.txt" />
+            <div class="dropzone-content">
+              <div class="drop-prompt">Choose or drag telemetry file (.srt, .csv)</div>
+              <div class="drop-hint">Used for real-world meters and GPS placement</div>
+            </div>
+            <div id="telem-file-info" class="file-info" style="display:none">
+              <span class="file-name"></span>
+              <span class="file-size"></span>
+              <button type="button" class="btn-clear-file">&times;</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Simple Reconstruction Parameters -->
+        <div class="form-row">
+          <div class="form-group col-half">
+            <label class="form-label" for="select-quality">Quality</label>
+            <select id="select-quality" name="quality" class="form-select">
+              <option value="balanced" selected>Standard (~2-3 min, Recommended)</option>
+              <option value="fast">Quick Preview (~60-90 sec)</option>
+              <option value="hd">High Detail (~6-8 min)</option>
+            </select>
+          </div>
+          <div class="form-group col-half">
+            <label class="form-label" for="select-profile">Processing Mode</label>
+            <select id="select-profile" name="profile" class="form-select">
+              <option value="default" selected>Standard Mode</option>
+              <option value="lowvram">Laptop Mode (Low Memory)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="input-run-id">Project Name (Optional)</label>
+          <input type="text" id="input-run-id" name="run_id" class="form-input" placeholder="e.g. flight_01" />
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" id="btn-cancel-upload" class="btn-secondary">Cancel</button>
+          <button type="submit" id="btn-submit-upload" class="btn-primary">Start Processing</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ====================================================================
+       Modal: Live Processing Status & Real-time Logs
+  ===================================================================== -->
+  <div id="job-modal" class="modal-backdrop" style="display:none">
+    <div class="modal-dialog modal-large">
+      <div class="modal-header">
+        <div>
+          <h3 id="job-modal-title">Processing Video…</h3>
+          <p id="job-modal-subtitle">Building 3D model from flight video</p>
+        </div>
+        <button id="btn-job-modal-close" class="modal-close-btn" style="display:none">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Visual Stepper with Simple Names -->
+        <div class="stepper-grid">
+          <div class="step-card" data-stage="frames">
+            <div class="step-num">Step 1</div>
+            <div class="step-label">Video Frames</div>
+            <div class="step-status">Pending</div>
+          </div>
+          <div class="step-card" data-stage="masks">
+            <div class="step-num">Step 2</div>
+            <div class="step-label">Filter Objects</div>
+            <div class="step-status">Pending</div>
+          </div>
+          <div class="step-card" data-stage="pose">
+            <div class="step-num">Step 3</div>
+            <div class="step-label">Camera Track</div>
+            <div class="step-status">Pending</div>
+          </div>
+          <div class="step-card" data-stage="dense">
+            <div class="step-num">Step 4</div>
+            <div class="step-label">3D Cloud</div>
+            <div class="step-status">Pending</div>
+          </div>
+          <div class="step-card" data-stage="mesh">
+            <div class="step-num">Step 5</div>
+            <div class="step-label">3D Mesh</div>
+            <div class="step-status">Pending</div>
+          </div>
+          <div class="step-card" data-stage="export">
+            <div class="step-num">Step 6</div>
+            <div class="step-label">Export Maps</div>
+            <div class="step-status">Pending</div>
+          </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div class="progress-bar-container">
+          <div id="job-progress-bar" class="progress-bar-fill"></div>
+        </div>
+
+        <!-- Live Terminal Log Drawer -->
+        <div class="terminal-drawer">
+          <div class="terminal-header">
+            <span>Processing Logs</span>
+            <span id="job-elapsed-time" class="elapsed-badge">00:00</span>
+          </div>
+          <pre id="job-log-output" class="terminal-body custom-scroll">Waiting for output…</pre>
+        </div>
+      </div>
+
+      <div class="modal-footer" id="job-modal-footer" style="display:none">
+        <button id="btn-view-finished-model" class="btn-primary btn-large">View 3D Model</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Three.js Viewport (Vendored Offline Air-Gapped) -->
+  <script type="module" src="viewer.js"></script>
+
+  <!-- UI Controller -->
+  <script src="app.js"></script>
+</body>
+</html>

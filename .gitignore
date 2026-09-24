@@ -1,0 +1,59 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Project data & binaries: NEVER commit ---
+data/
+runs/
+tools/
+weights/
+*.pt
+*.pth
+*.mvs
+*.ply
+*.laz
+*.las
+*.obj
+*.glb
+*.mtl
+*.dmap
+*.dmap.estimate
+*.tif
+*.tiff
+
+# --- Video & media files ---
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# --- Logs & temp databases ---
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# --- OS / Editor / AI assistant metadata ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+.claude/
+.gemini/
+
+# --- Environment & API Keys ---
+.env
+*.env
+!.env.example
+
+# --- Private materials ---
+_hackathon_materials/
+scratch/
+

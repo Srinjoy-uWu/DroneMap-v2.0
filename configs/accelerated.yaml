@@ -1,0 +1,71 @@
+# dronemap accelerated configuration
+#
+# Profile for high-throughput cloud / Kaggle / Colab execution (dual T4, A100, RTX 4090).
+# Unlocks native 4K processing, large foundation models, dense MVS, and high-resolution exports.
+#
+# Usage:
+#   dronemap run --video flight.mp4 --profile accelerated --run-id flight_4k_cloud
+
+frames:
+  max_long_edge: 3840          # Native 4K processing
+  jpeg_quality: 98
+  max_keyframes: 1200
+  sharpness_window: 8
+  target_overlap: 0.80
+
+masks:
+  enabled: true
+  backend: yolo
+  model: yolov8x-seg.pt        # Extra-large segmentation model on cloud GPUs
+  conf: 0.25
+  dilate_px: 16
+  device: cuda
+
+pose:
+  camera_model: OPENCV
+  max_num_features: 32768      # Rich feature extraction
+  matcher: sequential
+  sequential_overlap: 20
+  quadratic_overlap: true
+  loop_detection: true
+
+depth:
+  enabled: true
+  backend: depth_anything
+  depth_anything_model: large  # Large DINOv2 foundation depth model (~3.5 GB VRAM)
+  stride: 2                    # Dense depth coverage
+  save_depth_png: true
+
+semantics:
+  enabled: true
+  model: nvidia/segformer-b0-finetuned-ade-512-512
+  checkpoint_domain_verified: true
+  batch_size: 8
+
+dense:
+  resolution_level: 0          # Full resolution MVS densification
+  max_resolution: 3840
+  number_views: 8
+  number_views_fuse: 4
+  estimate_colors: 2
+  estimate_normals: 2
+
+mesh:
+  mode: auto
+  refine: true
+  refine_max_views: 12
+  texture_size: 16384          # Ultra-high-resolution 16K texture atlas
+  seam_leveling: true
+  max_texture_black_fraction: 0.20
+
+export:
+  raster_gsd: auto
+  dsm: true
+  dtm: true
+  orthomosaic: true
+  point_cloud_laz: true
+  mesh_glb: true
+  cloud_voxel_size: 0.02       # 2 cm voxel fidelity
+
+min_free_disk_gb: 40.0
+purge_intermediates: false

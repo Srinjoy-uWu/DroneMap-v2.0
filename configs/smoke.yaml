@@ -1,0 +1,30 @@
+# Smallest useful run: CI, the pytest -m e2e gate, and "does the plumbing work"
+# checks. Not for producing a demo asset.
+
+min_free_disk_gb: 5.0
+
+frames:
+  max_long_edge: 960
+  max_keyframes: 40
+  sharpness_window: 4
+
+masks:
+  enabled: false        # YOLO weights download is not worth it for a plumbing check
+
+pose:
+  max_num_features: 4096
+  sequential_overlap: 5
+  loop_detection: false
+  min_registered_fraction: 0.5
+
+dense:
+  resolution_level: 2
+  max_resolution: 960
+  number_views: 4
+
+mesh:
+  refine: false
+  texture_size: 2048
+
+export:
+  orthomosaic: false
