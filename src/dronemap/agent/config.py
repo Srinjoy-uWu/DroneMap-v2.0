@@ -20,7 +20,7 @@ class AgentConfig:
     preferred_provider: str = field(
         default_factory=lambda: os.environ.get("DRONEMAP_LLM_PROVIDER", "auto").lower()
     )
-    model_name: str | None = None
+    model_name: str | None = field(default_factory=lambda: os.environ.get("DRONEMAP_LLM_MODEL"))
     timeout_seconds: float = 30.0
     temperature: float = 0.2
 
