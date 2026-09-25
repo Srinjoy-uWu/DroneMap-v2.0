@@ -1517,7 +1517,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             conf_summary = _write_laz(points, colors, laz_path, crs, cfg.cloud_voxel_size)
             ctx.output(cloud_laz=str(laz_path))
             for k, v in conf_summary.items():
-                ctx.metric(f"laz_{k}", v)
+                ctx.metric(**{f"laz_{k}": v})
         except Exception as exc:
             ctx.note(f"LAZ export failed: {exc}")
 

@@ -64,8 +64,11 @@ class LLMClient:
         import httpx
 
         api_key = self.config.gemini_api_key
-        model = self.config.default_model or "gemini-2.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        primary_model = self.config.default_model or "gemini-flash-lite-latest"
+        candidate_models = [primary_model]
+        for fallback in ("gemini-flash-lite-latest", "gemini-2.5-flash", "gemini-flash-latest"):
+            if fallback not in candidate_models:
+                candidate_models.append(fallback)
 
         parts: list[dict[str, Any]] = []
 
@@ -94,19 +97,36 @@ class LLMClient:
         if json_mode:
             payload["generationConfig"]["responseMimeType"] = "application/json"
 
-        with httpx.Client(timeout=self.config.timeout_seconds) as client:
-            resp = client.post(url, json=payload)
-            if resp.status_code != 200:
-                logger.warning("Gemini API error %d: %s", resp.status_code, resp.text[:200])
-                return None
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return None
-            content_parts = candidates[0].get("content", {}).get("parts", [])
-            if not content_parts:
-                return None
-            return content_parts[0].get("text", "")
+        for model in candidate_models:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            try:
+                with httpx.Client(timeout=self.config.timeout_seconds) as client:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if not candidates:
+                            continue
+                        content_parts = candidates[0].get("content", {}).get("parts", [])
+                        if not content_parts:
+                            continue
+                        return content_parts[0].get("text", "")
+                    elif resp.status_code in (429, 503):
+                        logger.warning(
+                            "Gemini model %s returned HTTP %d (temporary load spike); cascading to fallback candidate.",
+                            model,
+                            resp.status_code,
+                        )
+                        continue
+                    else:
+                        logger.warning("Gemini API error %d on %s: %s", resp.status_code, model, resp.text[:200])
+                        if resp.status_code in (400, 401, 403):
+                            return None
+            except Exception as exc:
+                logger.warning("Exception querying Gemini model %s: %s", model, exc)
+                continue
+
+        return None
 
     def _call_openai(
         self,

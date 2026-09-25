@@ -108,7 +108,8 @@ def test_offline_intelligence_generation(tmp_path: Path):
         "accuracy": {"crs": "EPSG:32643", "coordinate_mode": "georeferenced"},
     }
 
-    report = generate_intelligence_report(ws)
+    offline_client = LLMClient(AgentConfig(preferred_provider="offline"))
+    report = generate_intelligence_report(ws, client=offline_client)
     assert isinstance(report, IntelligenceReport)
     assert report.run_id == "mission_alpha"
     assert report.is_ai_boosted is False
