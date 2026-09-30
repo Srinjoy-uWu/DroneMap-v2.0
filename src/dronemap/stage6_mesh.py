@@ -204,23 +204,16 @@ def _save_rectified_ply(ply_path: Path, points: "np.ndarray", colors: "np.ndarra
     cloud.export(str(ply_path))
 
 
-def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ctx: "_StageContext") -> None:
+def _resolve_vertical_prior(ws: "RunWorkspace", ctx: "_StageContext") -> tuple["np.ndarray | None", bool]:
+    import json
+    import math
     import numpy as np
-
-    from .mesh_completion import plan_mesh_completion_with_ollama, rectify_and_clean_dense_cloud
-    from .terrain import reconstruct_terrain_mesh, up_hint_from_cameras
-    from .stage7_export import _load_dense_ply
-
-    ctx.note("Running AI-assisted 3D surface mesh reconstruction & hole completion...")
-    points, colors = _load_dense_ply(dense_ply)
-    out_obj = ws.mesh_dir / "scene_dense_mesh_terrain_texture.obj"
-    out_ply = ws.mesh_dir / "scene_dense_mesh_terrain.ply"
+    from .terrain import up_hint_from_cameras
 
     transform = {}
     trans_p = ws.georef_sparse_dir / "transform.json"
     if trans_p.exists():
         try:
-            import json
             transform = json.loads(trans_p.read_text(encoding="utf-8"))
         except Exception:
             pass
@@ -236,7 +229,6 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
     lon = centroid.get("lon", accuracy.get("lon0"))
 
     if is_georef and coord_frame == "ECEF" and lat is not None and lon is not None:
-        import math
         phi = math.radians(float(lat))
         lam = math.radians(float(lon))
         up_hint = np.array([
@@ -249,37 +241,82 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
             f"ground-plane prior: ECEF geodetic vertical at ({float(lat):.4f}°, {float(lon):.4f}°) "
             f"[{up_hint[0]:.3f}, {up_hint[1]:.3f}, {up_hint[2]:.3f}]"
         )
-    elif is_georef and coord_frame in ("LOCAL_ENU", "ENU", "UTM"):
+        return up_hint, True
+    if is_georef and coord_frame in ("LOCAL_ENU", "ENU", "UTM"):
         up_hint = np.array([0.0, 0.0, 1.0])
         ctx.note("ground-plane prior: ENU/UTM local vertical (+Z), from georeferencing")
-    else:
-        images_txt = None
-        for cand in [
-            ws.sparse_dir / "0" / "txt" / "images.txt",
-            ws.sparse_dir / "txt" / "images.txt",
-            ws.sparse_dir / "0" / "images.txt",
-            ws.sparse_dir / "images.txt",
-        ]:
-            if cand.exists():
-                images_txt = cand
-                break
-        if images_txt is None:
-            txt_matches = list(ws.sparse_dir.rglob("images.txt"))
-            images_txt = txt_matches[0] if txt_matches else (ws.sparse_dir / "0" / "images.txt")
+        return up_hint, True
 
-        up_hint = up_hint_from_cameras(images_txt)
-        if up_hint is not None:
-            ctx.note(
-                "ground-plane prior: mean camera optical axis "
-                f"({np.round(up_hint, 3).tolist()}) — the cloud is not "
-                "georeferenced, so this is an estimate of vertical, not a datum"
-            )
-        else:
-            ctx.note(
-                "no vertical prior available (not georeferenced, and the camera "
-                "poses give no consistent down) — the 2.5D product's alignment "
-                "is only as good as the plane fit"
-            )
+    images_txt = None
+    for cand in [
+        ws.sparse_dir / "0" / "txt" / "images.txt",
+        ws.sparse_dir / "txt" / "images.txt",
+        ws.sparse_dir / "0" / "images.txt",
+        ws.sparse_dir / "images.txt",
+    ]:
+        if cand.exists():
+            images_txt = cand
+            break
+    if images_txt is None:
+        txt_matches = list(ws.sparse_dir.rglob("images.txt"))
+        images_txt = txt_matches[0] if txt_matches else (ws.sparse_dir / "0" / "images.txt")
+
+    up_hint = up_hint_from_cameras(images_txt)
+    if up_hint is not None:
+        ctx.note(
+            "ground-plane prior: mean camera optical axis "
+            f"({np.round(up_hint, 3).tolist()}) — the cloud is not "
+            "georeferenced, so this is an estimate of vertical, not a datum"
+        )
+    else:
+        ctx.note(
+            "no vertical prior available (not georeferenced, and the camera "
+            "poses give no consistent down) — the 2.5D product's alignment "
+            "is only as good as the plane fit"
+        )
+    return up_hint, False
+
+
+def _run_terrain_mesh(
+    ws: "RunWorkspace",
+    cfg: "MeshConfig",
+    dense_ply: Path,
+    ctx: "_StageContext",
+    preloaded_sem: object | None = None,
+) -> None:
+    import numpy as np
+
+    from .mesh_completion import plan_mesh_completion_with_ollama, rectify_and_clean_dense_cloud
+    from .scene_segmentation import condition_and_classify_3d_cloud, release_neural_models
+    from .terrain import reconstruct_terrain_mesh
+    from .stage7_export import _load_dense_ply
+
+    ctx.note("Running AI-assisted 3D surface mesh reconstruction & semantic object/ground separation...")
+    up_hint, is_georef = _resolve_vertical_prior(ws, ctx)
+
+    if preloaded_sem is not None:
+        sem_res = preloaded_sem
+        points, colors = sem_res.points, sem_res.colors
+    else:
+        raw_ply = ws.dense_dir / "scene_dense_raw.ply"
+        if not raw_ply.exists() and dense_ply.exists():
+            import shutil
+            try:
+                shutil.copy2(dense_ply, raw_ply)
+            except Exception:
+                pass
+        source_ply = raw_ply if raw_ply.exists() else dense_ply
+        points, colors = _load_dense_ply(source_ply)
+        try:
+            sem_res = condition_and_classify_3d_cloud(ws, points, colors, up_vec=up_hint)
+            points, colors = sem_res.points, sem_res.colors
+            if sem_res.summary.get("sky_points_removed", 0) > 0 or sem_res.summary.get("oblique_elevation_rectified"):
+                _save_rectified_ply(dense_ply, points, colors)
+        finally:
+            release_neural_models()
+
+    out_obj = ws.mesh_dir / "scene_dense_mesh_terrain_texture.obj"
+    out_ply = ws.mesh_dir / "scene_dense_mesh_terrain.ply"
 
     # Extract camera centres if available to disambiguate upward surface normal
     cam_centres = None
@@ -303,11 +340,10 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
             f"3D cloud conditioning: removed {clean_stats['outliers_removed']} floating outliers; "
             f"roll rectification = {clean_stats['roll_rectified_deg']}°"
         )
-        if clean_stats["roll_rectified_deg"] > 0:
-            try:
-                _save_rectified_ply(dense_ply, points, colors)
-            except Exception:
-                pass
+        try:
+            _save_rectified_ply(dense_ply, points, colors)
+        except Exception:
+            pass
 
     # Query Ollama Local SLM (or deterministic planner) for 3D mesh hole completion parameters
     eff_up = up_hint if up_hint is not None else np.array([0.0, 0.0, 1.0])
@@ -337,8 +373,16 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
             f"{metrics['ground_rms_residual_m']} m, relief {metrics['relief_m']} m"
         )
 
+    sem_summary = getattr(sem_res, "summary", {}) if sem_res is not None else {}
+    struct_pts = (sem_summary.get("3d_cloud_class_counts") or {}).get("structure", 0)
+    mesh_type_label = (
+        "openmvs_3d"
+        if (struct_pts >= 500 and metrics["relief_m"] >= 5.0 and cfg.mode != "terrain_2.5d")
+        else "terrain_2.5d"
+    )
+
     ctx.metric(
-        mesh_type="terrain_2.5d",
+        mesh_type=mesh_type_label,
         n_vertices=metrics["n_vertices"],
         n_faces=metrics["n_faces"],
         texture_size=cfg.texture_size,
@@ -360,6 +404,10 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
         completion_strategy=plan.strategy,
         outliers_removed=clean_stats["outliers_removed"],
         roll_rectified_deg=clean_stats["roll_rectified_deg"],
+        sky_points_removed=sem_summary.get("sky_points_removed", 0),
+        horizon_points_removed=sem_summary.get("horizon_points_removed", 0),
+        structure_points=struct_pts,
+        oblique_elevation_rectified=sem_summary.get("oblique_elevation_rectified", False),
     )
     ctx.output(
         textured_obj=str(out_obj),
@@ -392,12 +440,53 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         _run_terrain_mesh(ws, cfg, dense_ply, ctx)
         return
 
+    # Condition and semantically classify the 3D dense cloud (stripping Sky & distant horizon,
+    # and detecting oblique sightline elevation ramps where Castle/Terrain/Water were flattened)
+    sem_res = None
+    try:
+        from .scene_segmentation import condition_and_classify_3d_cloud, release_neural_models
+        from .stage7_export import _load_dense_ply
+
+        raw_ply = ws.dense_dir / "scene_dense_raw.ply"
+        if not raw_ply.exists():
+            import shutil
+            try:
+                shutil.copy2(dense_ply, raw_ply)
+            except Exception:
+                pass
+        source_ply = raw_ply if raw_ply.exists() else dense_ply
+        pts_in, cols_in = _load_dense_ply(source_ply)
+        up_hint, _ = _resolve_vertical_prior(ws, ctx)
+        try:
+            sem_res = condition_and_classify_3d_cloud(ws, pts_in, cols_in, up_vec=up_hint)
+        finally:
+            release_neural_models()
+
+        s_info = sem_res.summary
+        ctx.note(
+            f"3D semantic classification: {s_info.get('3d_cloud_class_counts')} "
+            f"(removed {s_info.get('sky_points_removed', 0)} sky + "
+            f"{s_info.get('horizon_points_removed', 0)} far-horizon points)"
+        )
+        if s_info.get("sky_points_removed", 0) > 0 or s_info.get("oblique_elevation_rectified"):
+            _save_rectified_ply(dense_ply, sem_res.points, sem_res.colors)
+
+        if cfg.mode == "auto" and s_info.get("oblique_elevation_rectified"):
+            ctx.note(
+                "Oblique sightline ramp detected and rectified via SegFormer + Depth-Anything-V2; "
+                "reconstructing 3D structure-preserving mesh from conditioned 3D cloud"
+            )
+            _run_terrain_mesh(ws, cfg, dense_ply, ctx, preloaded_sem=sem_res)
+            return
+    except Exception as exc:
+        ctx.note(f"3D semantic conditioning note: {exc}")
+
     # Locate the dense MVS project
     dense_mvs = ws.dense_dir / "scene_dense.mvs"
     if not dense_mvs.exists():
         if cfg.mode == "auto":
             ctx.note(f"scene_dense.mvs not found; falling back to 2.5D terrain reconstruction from {dense_ply.name}")
-            _run_terrain_mesh(ws, cfg, dense_ply, ctx)
+            _run_terrain_mesh(ws, cfg, dense_ply, ctx, preloaded_sem=sem_res)
             return
         raise RuntimeError(
             f"scene_dense.mvs not found at {dense_mvs}. "

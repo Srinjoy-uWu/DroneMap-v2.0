@@ -586,16 +586,19 @@ def _rasterise_dsm(
         dst.write(dsm, 1)
 
 
-def _derive_dtm(dsm_path: Path, out_path: Path, crs: str) -> None:
-    """Produce a simple DTM by morphological opening (erosion then dilation).
+def _derive_dtm(dsm_path: Path, out_path: Path, crs: str, gsd: float = 0.25) -> None:
+    """Produce a Bare-Earth Digital Terrain Model (DTM) by stripping 3D structures (buildings/castles) and canopy.
 
-    This is a rough approximation: a proper CSF (Cloth Simulation Filter) like
-    the one in liblas / CloudCompare gives far better results.  For the Core
-    path this is sufficient; replace with CSF in Stretch.
+    Uses a multi-scale morphological ground-envelope filter scaled to ~36 metres
+    in physical ground coordinates (rather than a fixed 5x5 pixel kernel),
+    identifies elevated 3D objects (> 2.0 m above the ground envelope), replaces
+    their footprints with interpolated bare-earth terrain, and writes both
+    ``dtm.tif`` and ``dsm_dtm_preview.png`` (DSM vs Bare-Earth DTM vs Object Height nDSM).
     """
     try:
+        import cv2
         import rasterio
-        from scipy.ndimage import grey_opening
+        from scipy.ndimage import distance_transform_edt, gaussian_filter, grey_opening
     except ImportError as exc:
         raise RuntimeError("rasterio and scipy are required for DTM export.") from exc
 
@@ -604,22 +607,66 @@ def _derive_dtm(dsm_path: Path, out_path: Path, crs: str) -> None:
         meta = src.meta.copy()
         nodata = src.nodata
 
-    # GeoTIFFs written by this pipeline use NaN nodata.  NaN != NaN is true,
-    # so equality against nodata would falsely mark every void as valid.
     valid = np.isfinite(dsm)
     dsm_filled = dsm.copy()
-    if not valid.all():
-        from scipy.ndimage import distance_transform_edt
+    if not valid.all() and valid.any():
         inds = distance_transform_edt(~valid, return_indices=True)[1]
         dsm_filled = dsm_filled[inds[0], inds[1]]
 
-    # A 5×5 morphological opening approximates removing objects up to ~2.5 cells
-    dtm = grey_opening(dsm_filled, size=(5, 5)).astype(np.float32)
+    # Physical 38m window removes 3D buildings, castles, and tree canopy down to the terrain base
+    win_px = max(11, min(165, int(round(38.0 / max(gsd, 0.05))) | 1))
+    coarse_ground = grey_opening(dsm_filled, size=(win_px, win_px)).astype(np.float32)
+    above_ground = dsm_filled - coarse_ground
+
+    # Pixels rising > 2.0 m above the local ground envelope are 3D structures / trees
+    is_object = above_ground > 2.0
+    ground_only = dsm_filled.copy()
+    if is_object.any() and (~is_object).any():
+        inds_g = distance_transform_edt(is_object, return_indices=True)[1]
+        ground_only[is_object] = coarse_ground[inds_g[0][is_object], inds_g[1][is_object]]
+
+    dtm_smooth = gaussian_filter(ground_only, sigma=max(2.0, win_px * 0.06)).astype(np.float32)
+    dtm = np.minimum(dsm_filled, dtm_smooth).astype(np.float32)
     dtm[~valid] = nodata if nodata is not None else np.nan
 
     meta["crs"] = crs
     with rasterio.open(str(out_path), "w", **meta) as dst:
         dst.write(dtm, 1)
+
+    # Render a 3-panel visual comparison: DSM (Surface + Structures) | DTM (Bare Earth) | nDSM (3D Objects Height)
+    try:
+        if valid.any():
+            lo_z = float(np.percentile(dsm_filled[valid], 2))
+            hi_z = float(np.percentile(dsm_filled[valid], 99))
+            span_z = max(hi_z - lo_z, 1.0)
+
+            dsm_norm = np.clip((dsm_filled - lo_z) / span_z * 255.0, 0, 255).astype(np.uint8)
+            dtm_norm = np.clip((dtm_smooth - lo_z) / span_z * 255.0, 0, 255).astype(np.uint8)
+            ndsm = np.maximum(0.0, dsm_filled - dtm_smooth)
+            ndsm_max = max(float(np.percentile(ndsm[valid], 99.5)), 2.0)
+            ndsm_norm = np.clip(ndsm / ndsm_max * 255.0, 0, 255).astype(np.uint8)
+
+            c_dsm = cv2.applyColorMap(dsm_norm, cv2.COLORMAP_TURBO)
+            c_dtm = cv2.applyColorMap(dtm_norm, cv2.COLORMAP_TURBO)
+            c_ndsm = cv2.applyColorMap(ndsm_norm, cv2.COLORMAP_INFERNO)
+            for panel in (c_dsm, c_dtm, c_ndsm):
+                panel[~valid] = (18, 22, 28)
+
+            h_p, w_p = c_dsm.shape[:2]
+            header_h = 40
+            canvas = np.full((h_p + header_h, w_p * 3 + 16, 3), 20, dtype=np.uint8)
+            canvas[header_h:, 0:w_p] = c_dsm
+            canvas[header_h:, w_p + 8 : 2 * w_p + 8] = c_dtm
+            canvas[header_h:, 2 * w_p + 16 : 3 * w_p + 16] = c_ndsm
+
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(canvas, f"DSM: Surface + 3D Castle/Objects (max +{span_z:.1f}m)", (12, 26), font, 0.55, (240, 240, 240), 1, cv2.LINE_AA)
+            cv2.putText(canvas, "DTM: Bare-Earth Ground Terrain (Structures Stripped)", (w_p + 20, 26), font, 0.55, (240, 240, 240), 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"nDSM: Isolated 3D Objects / Castle (+{ndsm_max:.1f}m)", (2 * w_p + 28, 26), font, 0.55, (0, 230, 255), 1, cv2.LINE_AA)
+
+            cv2.imwrite(str(out_path.parent / "dsm_dtm_preview.png"), canvas)
+    except Exception:
+        pass
 
 
 def _write_ortho(
@@ -630,39 +677,41 @@ def _write_ortho(
     out_path: Path,
     crs: str,
 ) -> None:
-    """Write a simple point-projected orthomosaic.
-
-    A proper ortho comes from projecting the textured mesh — that requires
-    rendering infrastructure.  Here we rasterise the coloured dense cloud,
-    which gives a serviceable result for the Core path.
-    """
+    """Write a top-down true-color orthomosaic GeoTIFF and PNG preview."""
     try:
+        import cv2
         import rasterio
         from rasterio.transform import from_bounds
+        from scipy.ndimage import distance_transform_edt
     except ImportError as exc:
         raise RuntimeError("rasterio is required for orthomosaic export.") from exc
 
-    xs, ys = points[:, 0], points[:, 1]
+    xs, ys, zs = points[:, 0], points[:, 1], points[:, 2]
     x_min, x_max = xs.min(), xs.max()
     y_min, y_max = ys.min(), ys.max()
 
     cols = max(1, int(math.ceil((x_max - x_min) / gsd)))
     rows = max(1, int(math.ceil((y_max - y_min) / gsd)))
 
-    ortho_acc = np.zeros((3, rows, cols), dtype=np.float64)
-    counts = np.zeros((rows, cols), dtype=np.int32)
+    # Sort points bottom-to-top in Z so highest visible surface wins in each cell
+    order = np.argsort(zs)
+    xs_s, ys_s, cols_s = xs[order], ys[order], colors[order]
 
-    col_idx = ((xs - x_min) / gsd).astype(np.int32).clip(0, cols - 1)
-    row_idx = ((y_max - ys) / gsd).astype(np.int32).clip(0, rows - 1)
-    flat_idx = row_idx * cols + col_idx
-    for band in range(3):
-        np.add.at(ortho_acc[band].ravel(), flat_idx, colors[:, band].astype(np.float64))
-    np.add.at(counts.ravel(), flat_idx, 1)
+    col_idx = ((xs_s - x_min) / gsd).astype(np.int32).clip(0, cols - 1)
+    row_idx = ((y_max - ys_s) / gsd).astype(np.int32).clip(0, rows - 1)
 
-    mask = counts > 0
     ortho = np.zeros((3, rows, cols), dtype=np.uint8)
+    mask = np.zeros((rows, cols), dtype=bool)
+    mask[row_idx, col_idx] = True
     for band in range(3):
-        ortho[band][mask] = np.clip(ortho_acc[band][mask] / counts[mask], 0, 255).astype(np.uint8)
+        ortho[band, row_idx, col_idx] = cols_s[:, band]
+
+    # Fill small point-spacing pinholes (<= 3.5 pixels) inside the survey footprint
+    if mask.any() and not mask.all():
+        dist, inds = distance_transform_edt(~mask, return_indices=True)
+        fill_zone = (~mask) & (dist <= 3.5)
+        for band in range(3):
+            ortho[band][fill_zone] = ortho[band][inds[0][fill_zone], inds[1][fill_zone]]
 
     tf = from_bounds(x_min, y_min, x_max, y_max, cols, rows)
     with rasterio.open(
@@ -676,6 +725,12 @@ def _write_ortho(
         photometric="RGB",
     ) as dst:
         dst.write(ortho)
+
+    try:
+        bgr_ortho = np.dstack([ortho[2], ortho[1], ortho[0]])
+        cv2.imwrite(str(out_path.parent / "ortho_preview.png"), bgr_ortho)
+    except Exception:
+        pass
 
 
 def _write_trajectory_kml(ws: "RunWorkspace", keyframes: list[dict], out_path: Path) -> None:
@@ -1538,8 +1593,10 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     if cfg.dtm and dsm_path.exists():
         dtm_path = export_dir / "dtm.tif"
         try:
-            _derive_dtm(dsm_path, dtm_path, crs)
+            _derive_dtm(dsm_path, dtm_path, crs, gsd=gsd)
             ctx.output(dtm=str(dtm_path))
+            if (export_dir / "dsm_dtm_preview.png").exists():
+                ctx.output(dsm_dtm_preview=str(export_dir / "dsm_dtm_preview.png"))
         except Exception as exc:
             ctx.note(f"DTM export failed: {exc}")
 
@@ -1551,6 +1608,8 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         try:
             _write_ortho(dense_ply, points, colors, gsd, ortho_path, crs)
             ctx.output(orthomosaic=str(ortho_path))
+            if (export_dir / "ortho_preview.png").exists():
+                ctx.output(ortho_preview=str(export_dir / "ortho_preview.png"))
         except Exception as exc:
             ctx.note(f"Orthomosaic export failed: {exc}")
 

@@ -113,15 +113,53 @@ def _build_dynamic_mask(
     return mask
 
 
-def _generate_preview_overlay(bgr: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Generate visual verification overlay blending original image with a transparent red mask overlay."""
+def _build_sky_mask(bgr: np.ndarray) -> np.ndarray:
+    """Detect high-luminance / low-texture sky regions in the upper frame so COLMAP ignores clouds/sky."""
+    h, w = bgr.shape[:2]
+    sky_mask = np.zeros((h, w), dtype=np.uint8)
+    top_h = max(1, int(h * 0.35))
+    top_bgr = bgr[:top_h]
+    hsv = cv2.cvtColor(top_bgr, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1].astype(np.float32)
+    val = hsv[:, :, 2].astype(np.float32)
+    b_ch = top_bgr[:, :, 0].astype(np.float32)
+    g_ch = top_bgr[:, :, 1].astype(np.float32)
+    r_ch = top_bgr[:, :, 2].astype(np.float32)
+
+    gray = cv2.cvtColor(top_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    lap = np.abs(cv2.Laplacian(gray, cv2.CV_32F, ksize=3))
+    smooth_tex = cv2.GaussianBlur(lap, (9, 9), 0) < 12.0
+
+    cand = (val > 155) & (sat < 85) & (b_ch >= r_ch - 10) & ((b_ch >= g_ch - 8) | (sat < 30)) & smooth_tex
+    cand_u8 = (cand.astype(np.uint8)) * 255
+    num_labels, cc, stats, _ = cv2.connectedComponentsWithStats(cand_u8)
+    top_connected = np.zeros((top_h, w), dtype=np.uint8)
+    for cid in range(1, num_labels):
+        if stats[cid, cv2.CC_STAT_TOP] <= 2 and stats[cid, cv2.CC_STAT_AREA] >= max(64, int(w * 0.05)):
+            top_connected[cc == cid] = 255
+
+    sky_mask[:top_h] = top_connected
+    return sky_mask
+
+
+def _generate_preview_overlay(
+    bgr: np.ndarray,
+    dynamic_mask: np.ndarray,
+    sky_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Generate visual verification overlay blending original image with red (dynamic) and cyan (sky) masks."""
     overlay = bgr.copy()
-    if mask.any():
+    if sky_mask is not None and sky_mask.any():
+        cyan_tint = np.zeros_like(bgr)
+        cyan_tint[:] = (235, 200, 100)  # Sky cyan in BGR
+        s_idx = sky_mask > 0
+        overlay[s_idx] = cv2.addWeighted(bgr[s_idx], 0.60, cyan_tint[s_idx], 0.40, 0)
+    if dynamic_mask.any():
         red_tint = np.zeros_like(bgr)
         red_tint[:] = (0, 0, 220)  # Red in BGR
-        idx = mask > 0
+        idx = dynamic_mask > 0
         overlay[idx] = cv2.addWeighted(bgr[idx], 0.55, red_tint[idx], 0.45, 0)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(dynamic_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(overlay, contours, -1, (0, 255, 0), 2)
     return overlay
 
@@ -144,6 +182,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     n_masked = 0
     n_dropped = 0
     total_fraction = 0.0
+    total_sky_fraction = 0.0
     surviving: list[dict] = []
 
     try:
@@ -173,12 +212,15 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                 dilate_px=cfg.dilate_px,
                 speed_mps=speed_mps,
             )
+            sky_mask = _build_sky_mask(bgr)
 
             masked_fraction = float(mask.sum()) / (255 * h * w)
+            sky_fraction = float(sky_mask.sum()) / (255 * h * w)
             total_fraction += masked_fraction
+            total_sky_fraction += sky_fraction
 
             if masked_fraction >= cfg.max_masked_fraction:
-                # Frame is mostly masked — drop it entirely
+                # Frame is mostly dynamic objects — drop it entirely
                 img_path.unlink(missing_ok=True)
                 n_dropped += 1
                 ctx.note(f"dropped {img_path.name}: {masked_fraction:.1%} masked")
@@ -186,9 +228,9 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
 
             # In COLMAP convention for --ImageReader.mask_path:
             # >0 (255) = VALID pixels where features are extracted.
-            # 0        = MASKED OUT pixels (dynamic objects) to be ignored.
-            # We invert the dynamic mask so background is 255 and dynamic objects are 0.
-            colmap_mask = 255 - mask
+            # 0        = MASKED OUT pixels (dynamic objects + sky) to be ignored.
+            combined_excluded = np.maximum(mask, sky_mask)
+            colmap_mask = 255 - combined_excluded
 
             # Save the mask PNG (COLMAP expects <image_name>.png, e.g. frame_000000.jpg.png)
             mask_path_ext = ws.masks_dir / f"{img_path.name}.png"
@@ -200,13 +242,14 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             previews_dir = ws.masks_dir / "previews"
             previews_dir.mkdir(parents=True, exist_ok=True)
             preview_file = previews_dir / f"{img_path.stem}_overlay.jpg"
-            overlay = _generate_preview_overlay(bgr, mask)
+            overlay = _generate_preview_overlay(bgr, mask, sky_mask)
             cv2.imwrite(str(preview_file), overlay)
 
-            if mask.any():
+            if mask.any() or sky_mask.any():
                 n_masked += 1
 
             kf["masked_fraction"] = round(masked_fraction, 4)
+            kf["sky_masked_fraction"] = round(sky_fraction, 4)
             kf["preview_path"] = str(preview_file)
             surviving.append(kf)
 
@@ -218,6 +261,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             )
 
         mean_fraction = total_fraction / max(len(keyframes), 1)
+        mean_sky_fraction = total_sky_fraction / max(len(keyframes), 1)
 
         # Update keyframe index (drop removed frames)
         ws.frames_index.write_text(json.dumps(surviving, indent=2), encoding="utf-8")
@@ -228,6 +272,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             n_dropped_frames=n_dropped,
             n_keyframes_out=len(surviving),
             mean_masked_fraction=round(mean_fraction, 4),
+            mean_sky_masked_fraction=round(mean_sky_fraction, 4),
         )
         ctx.output(masks_dir=str(ws.masks_dir))
     finally:

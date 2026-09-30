@@ -96,38 +96,42 @@ def rectify_and_clean_dense_cloud(
     # 3. Check & rectify unconstrained roll around the 1D camera trajectory
     roll_rectified_deg = 0.0
     if up_target is not None:
+        from .terrain import fit_ground_plane
+
         u_geo = np.asarray(up_target, dtype=np.float64)
         u_geo /= max(float(np.linalg.norm(u_geo)), 1e-12)
-
-        # Estimate true ground plane normal from central 85% of cleaned points
         med = np.median(pts, axis=0)
-        d_med = np.linalg.norm(pts - med, axis=1)
-        core = pts[d_med <= np.percentile(d_med, 85.0)]
-        if len(core) < 32:
-            core = pts
-        centred = core - np.median(core, axis=0)
-        _, s_vals, vt = np.linalg.svd(centred, full_matrices=False)
-        n_scene = vt[2] / max(float(np.linalg.norm(vt[2])), 1e-12)
 
-        # Orient n_scene toward the cameras (if known) or toward u_geo
-        if camera_centres is not None and len(camera_centres) >= 1:
-            cam_mean = np.mean(camera_centres, axis=0)
-            if float(np.dot(n_scene, cam_mean - med)) < 0.0:
+        # Check if cloud is an isotropic thin 2D sheet that rolled around a flight line
+        centered = pts - med
+        _, s_vals, vt = np.linalg.svd(centered, full_matrices=False)
+        is_isotropic_thin_sheet = (
+            s_vals[1] > 1e-6
+            and (s_vals[0] / s_vals[1] < 1.8)
+            and (s_vals[2] / s_vals[1] < 0.28)
+        )
+        if is_isotropic_thin_sheet:
+            n_scene = vt[2].copy()
+            n_scene /= max(float(np.linalg.norm(n_scene)), 1e-12)
+            if camera_centres is not None and len(camera_centres) > 0:
+                cam_vec = np.mean(np.asarray(camera_centres, dtype=np.float64), axis=0) - med
+                if float(np.dot(n_scene, cam_vec)) < 0.0:
+                    n_scene = -n_scene
+            elif float(np.dot(n_scene, u_geo)) < 0.0:
                 n_scene = -n_scene
+            tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
+            if tilt_deg > 12.0:
+                R_fix = _rotation_aligning(n_scene, u_geo)
+                pts = (pts - med) @ R_fix.T + med
+                roll_rectified_deg = round(tilt_deg, 2)
         else:
-            # Ensure the 95th percentile height tail (buildings/trees) is positive above the median ground
-            h_test = (pts - med) @ n_scene
-            lo_span = float(np.percentile(h_test, 50) - np.percentile(h_test, 5))
-            hi_span = float(np.percentile(h_test, 95) - np.percentile(h_test, 50))
-            if hi_span < lo_span and float(np.dot(n_scene, u_geo)) < 0.0:
-                n_scene = -n_scene
-
-        tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
-        # If the cloud's true surface normal is tilted > 12° from u_geo, level it
-        if tilt_deg > 12.0:
-            R_fix = _rotation_aligning(n_scene, u_geo)
-            pts = (pts - med) @ R_fix.T + med
-            roll_rectified_deg = round(tilt_deg, 2)
+            plane = fit_ground_plane(pts, up_hint=u_geo, max_tilt_deg=15.0)
+            n_scene = plane.normal
+            tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
+            if 3.0 < tilt_deg <= 15.0:
+                R_fix = _rotation_aligning(n_scene, u_geo)
+                pts = (pts - med) @ R_fix.T + med
+                roll_rectified_deg = round(tilt_deg, 2)
 
     return pts, cols, {
         "n_raw": int(n_raw),

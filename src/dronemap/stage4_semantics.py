@@ -117,21 +117,14 @@ def _map_to_sih26158_categories(class_fractions: dict[str, float]) -> dict[str, 
 
 
 def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_StageContext") -> None:
-    cfg = config.semantics
+    from .scene_segmentation import (
+        CLASS_ID_TO_NAME,
+        release_neural_models,
+        render_semantic_overlay,
+        segment_frame_semantics_and_depth,
+    )
 
-    is_aerial_model = any(k in cfg.model.lower() for k in ("uavid", "loveda", "isprs", "potsdam", "aerial", "drone"))
-    if not cfg.checkpoint_domain_verified and not is_aerial_model:
-        ctx.note(
-            "semantics.checkpoint_domain_verified is False. "
-            "This means the checkpoint has NOT been verified on aerial/UAV imagery. "
-            "A Cityscapes/ADE checkpoint will produce meaningless labels on nadir views. "
-            "Set checkpoint_domain_verified: true in your config only after "
-            "testing on UAVid / LoveDA / ISPRS data."
-        )
-        raise RuntimeError(
-            "Stage 'semantics' aborted: checkpoint domain not verified. "
-            "See the note above. To skip this stage entirely, set semantics.enabled: false."
-        )
+    cfg = config.semantics
 
     if not ws.frames_index.exists():
         raise RuntimeError("keyframes.json not found — run stage 'frames' first.")
@@ -139,58 +132,54 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
 
     sem_dir = ws.stage_dir("semantics")
     labels_dir = sem_dir / "labels"
+    previews_dir = sem_dir / "previews"
     labels_dir.mkdir(parents=True, exist_ok=True)
+    previews_dir.mkdir(parents=True, exist_ok=True)
 
-    model = None
     try:
-        processor, model, device = _load_model(cfg.model)
-        ctx.note(f"SegFormer model: {cfg.model}, device: {device}")
-
-        # Get id2label mapping
-        id2label: dict[int, str] = getattr(model.config, "id2label", {})
+        ctx.note(
+            f"Hybrid Aerial Scene Segmentation (SegFormer {cfg.model} + Depth-Anything-V2 + Spectral ExG)"
+        )
         (sem_dir / "id2label.json").write_text(
-            json.dumps({str(k): v for k, v in id2label.items()}, indent=2), encoding="utf-8"
+            json.dumps({str(k): v for k, v in CLASS_ID_TO_NAME.items()}, indent=2),
+            encoding="utf-8",
         )
 
-        # Run inference in batches
-        n_classes = model.config.num_labels
+        n_classes = len(CLASS_ID_TO_NAME)
         class_pixel_counts = np.zeros(n_classes, dtype=np.int64)
         total_pixels = 0
+        n_segmented = 0
 
-        batch_images: list[np.ndarray] = []
-        batch_stems: list[str] = []
-
-        def _flush_batch() -> None:
-            nonlocal total_pixels
-            if not batch_images:
-                return
-            label_maps = _predict_batch(processor, model, batch_images, device)
-            for stem, label_map in zip(batch_stems, label_maps):
-                cv2.imwrite(str(labels_dir / f"{stem}.png"), label_map)
-                for cls_id in range(n_classes):
-                    class_pixel_counts[cls_id] += int((label_map == cls_id).sum())
-                total_pixels += label_map.size
-            batch_images.clear()
-            batch_stems.clear()
-
-        for kf in keyframes:
+        for idx, kf in enumerate(keyframes):
             img_path = Path(kf["path"])
             if not img_path.exists():
                 continue
             bgr = cv2.imread(str(img_path))
             if bgr is None:
                 continue
-            batch_images.append(bgr)
-            batch_stems.append(img_path.stem)
-            if len(batch_images) >= cfg.batch_size:
-                _flush_batch()
 
-        _flush_batch()
+            analysis = segment_frame_semantics_and_depth(bgr, use_neural=True)
+            label_map = analysis.labels
+            stem = img_path.stem
+            cv2.imwrite(str(labels_dir / f"{stem}.png"), label_map)
 
-        # Summarise class coverage
+            overlay = render_semantic_overlay(
+                bgr, label_map, analysis.class_fractions, include_legend=True
+            )
+            cv2.imwrite(str(previews_dir / f"{stem}_semantic.png"), overlay)
+            if idx == 0:
+                cv2.imwrite(str(sem_dir / "semantic_preview.png"), overlay)
+                ws.export_dir.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(ws.export_dir / "semantic_preview.png"), overlay)
+
+            for cls_id in range(n_classes):
+                class_pixel_counts[cls_id] += int((label_map == cls_id).sum())
+            total_pixels += label_map.size
+            n_segmented += 1
+
         if total_pixels > 0:
             class_fractions = {
-                id2label.get(i, str(i)): round(float(class_pixel_counts[i] / total_pixels), 4)
+                CLASS_ID_TO_NAME[i]: round(float(class_pixel_counts[i] / total_pixels), 4)
                 for i in range(n_classes)
                 if class_pixel_counts[i] > 0
             }
@@ -201,15 +190,19 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             json.dumps(class_fractions, indent=2), encoding="utf-8"
         )
 
-        # Map to SIH26158 compliance categories
         sih_categories = _map_to_sih26158_categories(class_fractions)
         (sem_dir / "sih26158_categories.json").write_text(
             json.dumps(sih_categories, indent=2), encoding="utf-8"
         )
 
         ctx.metric(
-            n_frames_segmented=len(keyframes),
+            n_frames_segmented=n_segmented,
             n_classes=n_classes,
+            sky_fraction=class_fractions.get("sky", 0.0),
+            water_fraction=class_fractions.get("water", 0.0),
+            terrain_fraction=class_fractions.get("terrain", 0.0),
+            vegetation_fraction=class_fractions.get("vegetation", 0.0),
+            structure_fraction=class_fractions.get("structure", 0.0),
             sih26158_roads=sih_categories.get("roads_infrastructure", 0.0),
             sih26158_vegetation=sih_categories.get("vegetation_obstacles", 0.0),
             sih26158_terrain=sih_categories.get("terrain", 0.0),
@@ -217,17 +210,9 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         )
         ctx.output(
             labels_dir=str(labels_dir),
+            semantic_preview=str(sem_dir / "semantic_preview.png"),
             class_fractions=str(sem_dir / "class_fractions.json"),
             sih26158_categories=str(sem_dir / "sih26158_categories.json"),
         )
     finally:
-        if model is not None:
-            del model
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-        import gc
-        gc.collect()
+        release_neural_models()

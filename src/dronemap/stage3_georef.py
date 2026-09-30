@@ -294,6 +294,7 @@ def _recentre_aligned_model(
     lat0: float | None = None,
     lon0: float | None = None,
     coordinate_frame: str = "ECEF",
+    keyframes: list[dict] | None = None,
 ) -> tuple[list[float] | None, str]:
     """Shift the aligned model to a local origin and rectify unconstrained 1D flight-line roll.
 
@@ -302,8 +303,8 @@ def _recentre_aligned_model(
        origin preserves millimeter precision while recording ``model_offset_m``.
     2. Single-pass drone videos have camera positions along a 1D curve, leaving roll
        around the flight path unconstrained in point-only Umeyama alignment. We align
-       the scene's upward surface normal (oriented toward the cameras) with true
-       geodetic UP around the camera centroid so the 3D scene is always upright.
+       the camera-derived upward vector (refined by lower-envelope ground plane fit)
+       with true geodetic UP around the camera centroid so the 3D scene is always upright.
     """
     try:
         import pycolmap
@@ -311,7 +312,8 @@ def _recentre_aligned_model(
         return None, f"pycolmap unavailable ({type(exc).__name__}); model left at source magnitude"
 
     try:
-        from .terrain import _rotation_aligning
+        from .scene_segmentation import compute_camera_up_vector
+        from .terrain import _rotation_aligning, fit_ground_plane
 
         rec = pycolmap.Reconstruction(str(aligned_dir))
         centres = np.array([im.projection_center() for im in rec.images.values()], dtype=float)
@@ -343,21 +345,14 @@ def _recentre_aligned_model(
                 u_geo = np.array([0.0, 0.0, 1.0], dtype=float)
             u_geo /= max(float(np.linalg.norm(u_geo)), 1e-12)
 
-            pts_med = np.median(pts, axis=0)
-            dists = np.linalg.norm(pts - pts_med, axis=1)
-            core_mask = dists <= np.percentile(dists, 90.0)
-            pts_core = pts[core_mask] if int(core_mask.sum()) >= 16 else pts
-            centred = pts_core - np.median(pts_core, axis=0)
-            _, _, vt = np.linalg.svd(centred, full_matrices=False)
-            n_scene = vt[2] / max(float(np.linalg.norm(vt[2])), 1e-12)
+            cam_up = compute_camera_up_vector(aligned_dir, keyframes=keyframes)
+            prior_up = cam_up if cam_up is not None else u_geo
+            plane = fit_ground_plane(pts, up_hint=prior_up, max_tilt_deg=15.0)
+            n_scene = plane.normal
 
             cam_mean = centres.mean(axis=0)
-            ground_to_cam = cam_mean - pts_med
-            if float(np.dot(n_scene, ground_to_cam)) < 0.0:
-                n_scene = -n_scene
-
             tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
-            if tilt_deg > 5.0:
+            if 2.5 < tilt_deg <= 35.0:
                 R_level = _rotation_aligning(n_scene, u_geo)
                 t_level = cam_mean - R_level @ cam_mean
                 rec.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(R_level), t_level))
@@ -582,7 +577,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         # Re-centre before undistortion, because undistortion is what publishes
         # the model to OpenMVS and OpenMVS cannot survive geocentric magnitudes.
         model_offset, offset_note = _recentre_aligned_model(
-            aligned_dir, lat0=lat0, lon0=lon0, coordinate_frame=coordinate_frame
+            aligned_dir, lat0=lat0, lon0=lon0, coordinate_frame=coordinate_frame, keyframes=keyframes
         )
         ctx.note(offset_note)
         _undistort_aligned_model(colmap, ws, aligned_dir, config)

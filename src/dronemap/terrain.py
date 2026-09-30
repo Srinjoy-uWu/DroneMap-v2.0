@@ -430,9 +430,12 @@ def reconstruct_terrain_mesh(
 
     # 8. High-resolution texture atlas generation + Telea hole inpainting
     if colors is not None and len(colors) == len(points):
-        gr = np.clip(np.sum(weights * colors[idxs, 0], axis=1), 0, 255).astype(np.uint8)
-        gg = np.clip(np.sum(weights * colors[idxs, 1], axis=1), 0, 255).astype(np.uint8)
-        gb = np.clip(np.sum(weights * colors[idxs, 2], axis=1), 0, 255).astype(np.uint8)
+        k_col = min(3, k_query)
+        w_col = 1.0 / (np.maximum(dists[:, :k_col], 1e-4) + 0.05 * cell_size) ** 3
+        w_col /= np.maximum(w_col.sum(axis=1, keepdims=True), 1e-12)
+        gr = np.clip(np.sum(w_col * colors[idxs[:, :k_col], 0], axis=1), 0, 255).astype(np.uint8)
+        gg = np.clip(np.sum(w_col * colors[idxs[:, :k_col], 1], axis=1), 0, 255).astype(np.uint8)
+        gb = np.clip(np.sum(w_col * colors[idxs[:, :k_col], 2], axis=1), 0, 255).astype(np.uint8)
     else:
         gr = np.full(len(gz), 180, dtype=np.uint8)
         gg = np.full(len(gz), 180, dtype=np.uint8)
@@ -448,6 +451,11 @@ def reconstruct_terrain_mesh(
     tex_res = min(max(texture_size, 1024), 4096)
     if (ny, nx) != (tex_res, tex_res):
         tex_img = cv2.resize(base_tex, (tex_res, tex_res), interpolation=cv2.INTER_LANCZOS4)
+        try:
+            blur_tex = cv2.GaussianBlur(tex_img, (0, 0), sigmaX=1.2)
+            tex_img = cv2.addWeighted(tex_img, 1.25, blur_tex, -0.25, 0)
+        except Exception:
+            pass
     else:
         tex_img = base_tex
 
