@@ -329,7 +329,15 @@ def reconstruct_terrain_mesh(
     tree = scipy.spatial.cKDTree(pts_rot[:, :2])
     dists_1, _ = tree.query(grid_xy, k=1)
     max_support_dist = max(2.5 * cell_size, 0.6)
-    valid_node = (dists_1 <= max_support_dist)
+    direct_valid = (dists_1 <= max_support_dist).reshape((ny, nx))
+
+    # Close interior occlusion holes/cavities while preserving exterior boundary footprint
+    closed_valid = scipy.ndimage.binary_closing(
+        direct_valid, structure=np.ones((3, 3), dtype=bool), iterations=2
+    )
+    filled_valid = scipy.ndimage.binary_fill_holes(closed_valid)
+    inpainted_mask = (filled_valid & ~direct_valid).astype(np.uint8)
+    valid_node = filled_valid.ravel()
 
     k_query = min(max(k_neighbors, 8), len(points))
     dists, idxs = tree.query(grid_xy, k=k_query)
@@ -357,13 +365,19 @@ def reconstruct_terrain_mesh(
 
     gz = np.sum(weights * local_z, axis=1)
 
-    # 4. Normalised 2D Gaussian smoothing on valid elevation grid
-    Z_grid = gz.reshape((ny, nx))
-    Valid_grid = valid_node.reshape((ny, nx))
-    blurred_z = scipy.ndimage.gaussian_filter(Z_grid * Valid_grid, sigma=0.75)
-    blurred_w = scipy.ndimage.gaussian_filter(Valid_grid.astype(float), sigma=0.75)
-    safe_w = np.maximum(blurred_w, 1e-6)
-    Z_smooth = np.where(blurred_w > 1e-3, blurred_z / safe_w, Z_grid)
+    # 4. Edge-preserving 3D Bilateral Filtering (retains sharp vertical building/castle walls)
+    Z_grid = gz.reshape((ny, nx)).astype(np.float32)
+    Valid_grid = filled_valid
+    try:
+        z_range = max(float(np.percentile(Z_grid, 95) - np.percentile(Z_grid, 5)), 1.0)
+        Z_bilat = cv2.bilateralFilter(
+            Z_grid, d=5, sigmaColor=max(0.25 * z_range, 0.6), sigmaSpace=1.5
+        )
+        Z_smooth = np.where(Valid_grid, Z_bilat, Z_grid).astype(np.float64)
+    except Exception:
+        blurred_z = scipy.ndimage.gaussian_filter(Z_grid * Valid_grid, sigma=0.65)
+        blurred_w = scipy.ndimage.gaussian_filter(Valid_grid.astype(float), sigma=0.65)
+        Z_smooth = np.where(blurred_w > 1e-3, blurred_z / np.maximum(blurred_w, 1e-6), Z_grid)
     gz = np.where(valid_node, Z_smooth.ravel(), gz)
 
     # 5. Compute analytical smooth surface vertex normals
@@ -390,7 +404,6 @@ def reconstruct_terrain_mesh(
                 faces.append([i1, i3, i2])
 
     if not faces:
-        # Fallback in degenerate case: keep regular triangulation
         for r in range(ny - 1):
             for c in range(nx - 1):
                 i0 = r * nx + c
@@ -415,7 +428,7 @@ def reconstruct_terrain_mesh(
     N_used = N_orig[used_indices]
     UV_used = uv[used_indices]
 
-    # 8. High-resolution texture atlas generation
+    # 8. High-resolution texture atlas generation + Telea hole inpainting
     if colors is not None and len(colors) == len(points):
         gr = np.clip(np.sum(weights * colors[idxs, 0], axis=1), 0, 255).astype(np.uint8)
         gg = np.clip(np.sum(weights * colors[idxs, 1], axis=1), 0, 255).astype(np.uint8)
@@ -426,9 +439,15 @@ def reconstruct_terrain_mesh(
         gb = np.full(len(gz), 180, dtype=np.uint8)
 
     base_tex = np.column_stack([gr, gg, gb]).reshape((ny, nx, 3))
+    if int(inpainted_mask.sum()) > 0:
+        try:
+            base_tex = cv2.inpaint(base_tex, inpainted_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+        except Exception:
+            pass
+
     tex_res = min(max(texture_size, 1024), 4096)
     if (ny, nx) != (tex_res, tex_res):
-        tex_img = cv2.resize(base_tex, (tex_res, tex_res), interpolation=cv2.INTER_CUBIC)
+        tex_img = cv2.resize(base_tex, (tex_res, tex_res), interpolation=cv2.INTER_LANCZOS4)
     else:
         tex_img = base_tex
 

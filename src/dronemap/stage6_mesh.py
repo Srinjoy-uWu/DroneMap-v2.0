@@ -183,6 +183,8 @@ def _clean_mesh_for_viewing(source: Path, output: Path, min_faces: int, max_comp
 
     cleaned = trimesh.util.concatenate(keep)
     cleaned.remove_unreferenced_vertices()
+    from .mesh_completion import repair_and_complete_openmvs_mesh
+    repair_stats = repair_and_complete_openmvs_mesh(cleaned)
     if len(cleaned.faces) < min_faces:
         raise RuntimeError("Mesh cleanup left too little connected geometry for a useful 3D view")
     cleaned.export(str(output))
@@ -191,23 +193,29 @@ def _clean_mesh_for_viewing(source: Path, output: Path, min_faces: int, max_comp
         "output_faces": len(cleaned.faces),
         "components_kept": len(keep),
         "components_removed": max(0, len(components) - len(keep)),
+        "holes_filled_faces": repair_stats.get("holes_filled_faces", 0),
     }
+
+
+def _save_rectified_ply(ply_path: Path, points: "np.ndarray", colors: "np.ndarray | None") -> None:
+    """Persist rectified, outlier-cleaned 3D points to scene_dense.ply for Stage 7 exports."""
+    import trimesh
+    cloud = trimesh.points.PointCloud(vertices=points, colors=colors)
+    cloud.export(str(ply_path))
 
 
 def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ctx: "_StageContext") -> None:
     import numpy as np
 
+    from .mesh_completion import plan_mesh_completion_with_ollama, rectify_and_clean_dense_cloud
     from .terrain import reconstruct_terrain_mesh, up_hint_from_cameras
     from .stage7_export import _load_dense_ply
-    ctx.note("Running 2.5D terrain surface mesh reconstruction...")
+
+    ctx.note("Running AI-assisted 3D surface mesh reconstruction & hole completion...")
     points, colors = _load_dense_ply(dense_ply)
     out_obj = ws.mesh_dir / "scene_dense_mesh_terrain_texture.obj"
     out_ply = ws.mesh_dir / "scene_dense_mesh_terrain.ply"
 
-    # Determine vertical prior based on coordinate system:
-    # In georeferenced runs, OpenMVS scene_dense.ply is in shifted-ECEF (EPSG:4978).
-    # In ECEF, +Z is the Earth's polar axis (North Pole), NOT local vertical.
-    # True geodetic UP at (lat, lon) is: (cos phi cos lam, cos phi sin lam, sin phi).
     transform = {}
     trans_p = ws.georef_sparse_dir / "transform.json"
     if trans_p.exists():
@@ -245,8 +253,6 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
         up_hint = np.array([0.0, 0.0, 1.0])
         ctx.note("ground-plane prior: ENU/UTM local vertical (+Z), from georeferencing")
     else:
-        # No telemetry means COLMAP's +Z is arbitrary, so recover the vertical
-        # from where the cameras were pointing instead of assuming it.
         images_txt = None
         for cand in [
             ws.sparse_dir / "0" / "txt" / "images.txt",
@@ -275,12 +281,45 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
                 "is only as good as the plane fit"
             )
 
+    # Extract camera centres if available to disambiguate upward surface normal
+    cam_centres = None
+    try:
+        import pycolmap
+        for sdir in (ws.georef_sparse_dir, ws.sparse_dir / "0"):
+            if (sdir / "images.bin").exists() or (sdir / "images.txt").exists():
+                rec = pycolmap.Reconstruction(str(sdir))
+                if len(rec.images) > 0:
+                    cam_centres = np.array([im.projection_center() for im in rec.images.values()], dtype=float)
+                    break
+    except Exception:
+        pass
+
+    # Clean 3D outliers and rectify unconstrained 1D flight-line roll
+    points, colors, clean_stats = rectify_and_clean_dense_cloud(
+        points, colors, up_target=up_hint, camera_centres=cam_centres
+    )
+    if clean_stats["outliers_removed"] > 0 or clean_stats["roll_rectified_deg"] > 0:
+        ctx.note(
+            f"3D cloud conditioning: removed {clean_stats['outliers_removed']} floating outliers; "
+            f"roll rectification = {clean_stats['roll_rectified_deg']}°"
+        )
+        if clean_stats["roll_rectified_deg"] > 0:
+            try:
+                _save_rectified_ply(dense_ply, points, colors)
+            except Exception:
+                pass
+
+    # Query Ollama Local SLM (or deterministic planner) for 3D mesh hole completion parameters
+    eff_up = up_hint if up_hint is not None else np.array([0.0, 0.0, 1.0])
+    plan = plan_mesh_completion_with_ollama(points, eff_up)
+    ctx.note(f"mesh completion planner [{plan.provider}]: {plan.strategy} — {plan.reasoning}")
+
     metrics = reconstruct_terrain_mesh(
         points=points,
         colors=colors,
         output_obj=out_obj,
         output_ply=out_ply,
-        grid_dim=cfg.terrain_grid_dim,
+        grid_dim=max(cfg.terrain_grid_dim, plan.grid_dim),
         max_grid_dim=cfg.terrain_grid_max,
         up_hint=up_hint,
         max_tilt_deg=cfg.terrain_max_tilt_deg if is_georef else max(cfg.terrain_max_tilt_deg, 60.0),
@@ -317,6 +356,10 @@ def _run_terrain_mesh(ws: "RunWorkspace", cfg: "MeshConfig", dense_ply: Path, ct
         ground_normal=metrics.get("ground_normal"),
         relief_m=metrics["relief_m"],
         cloud_z_span_m=metrics["cloud_z_span_m"],
+        completion_provider=plan.provider,
+        completion_strategy=plan.strategy,
+        outliers_removed=clean_stats["outliers_removed"],
+        roll_rectified_deg=clean_stats["roll_rectified_deg"],
     )
     ctx.output(
         textured_obj=str(out_obj),

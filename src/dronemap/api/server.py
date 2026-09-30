@@ -564,26 +564,49 @@ class ChatRequest(BaseModel):
     query: str
 
 
+def _resolve_workspace(run_id: str) -> Any | None:
+    from ..workspace import RunWorkspace
+    if run_id not in ("default", "none", "", None):
+        try:
+            return RunWorkspace.open(_data_root, run_id)
+        except FileNotFoundError:
+            pass
+    runs = RunWorkspace.list_runs(_data_root)
+    if runs:
+        try:
+            return RunWorkspace.open(_data_root, runs[-1])
+        except Exception:
+            pass
+    return None
+
+
 @app.post("/api/runs/{run_id}/chat")
 def run_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
     """Natural language 3D spatial query copilot for Web Studio."""
-    from ..workspace import RunWorkspace
     from ..agent import handle_spatial_chat
-    try:
-        ws = RunWorkspace.open(_data_root, run_id)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
+    ws = _resolve_workspace(run_id)
+    if ws is None:
+        return {
+            "query": req.query,
+            "reply": (
+                "### Welcome to the DroneMap 3D Survey Copilot\n\n"
+                "No reconstruction runs have been processed yet.\n\n"
+                "- **To get started**: Upload a drone video and optional flight log (.srt/.csv) on the left panel, "
+                "or run `dronemap run --video samples/drone_flight_sample.mp4` via terminal.\n"
+                "- **Once complete**, I will analyze your 3D survey for metric accuracy, GSD resolution, "
+                "ASPRS confidence tiers, and vehicle trafficability."
+            ),
+            "action": None,
+        }
     return handle_spatial_chat(ws, req.query)
 
 
 @app.get("/api/runs/{run_id}/intelligence")
 def get_intelligence(run_id: str) -> dict[str, Any]:
     """Retrieve or generate multimodal tactical intelligence report."""
-    from ..workspace import RunWorkspace
     from ..agent import generate_intelligence_report
-    try:
-        ws = RunWorkspace.open(_data_root, run_id)
-    except FileNotFoundError:
+    ws = _resolve_workspace(run_id)
+    if ws is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
     report = generate_intelligence_report(ws)
     return report.to_dict()
@@ -592,11 +615,9 @@ def get_intelligence(run_id: str) -> dict[str, Any]:
 @app.get("/api/runs/{run_id}/diagnostics")
 def get_diagnostics(run_id: str) -> dict[str, Any]:
     """Retrieve self-healing reconstruction diagnostics and parameter advice."""
-    from ..workspace import RunWorkspace
     from ..agent import analyze_reconstruction_diagnostics
-    try:
-        ws = RunWorkspace.open(_data_root, run_id)
-    except FileNotFoundError:
+    ws = _resolve_workspace(run_id)
+    if ws is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
     report = analyze_reconstruction_diagnostics(ws)
     return report.to_dict()
@@ -605,10 +626,8 @@ def get_diagnostics(run_id: str) -> dict[str, Any]:
 @app.get("/api/runs/{run_id}/stages")
 def get_stages_audit(run_id: str) -> dict[str, Any]:
     """Retrieve stage-by-stage execution metrics, Before/After data, and artifact paths."""
-    from ..workspace import RunWorkspace
-    try:
-        ws = RunWorkspace.open(_data_root, run_id)
-    except FileNotFoundError:
+    ws = _resolve_workspace(run_id)
+    if ws is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
 
     manifest = ws.manifest
@@ -618,7 +637,7 @@ def get_stages_audit(run_id: str) -> dict[str, Any]:
     preview_files = [p.name for p in sorted(previews_dir.glob("*.jpg"))] if previews_dir.exists() else []
 
     return {
-        "run_id": run_id,
+        "run_id": ws.run_id,
         "stages": stages,
         "has_model": (ws.export_dir / "model.glb").exists(),
         "has_masks": ws.masks_dir.exists(),

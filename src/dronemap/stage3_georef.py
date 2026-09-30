@@ -289,26 +289,21 @@ def _run_pose_prior_mapper(
     return out_dir
 
 
-def _recentre_aligned_model(aligned_dir: Path) -> tuple[list[float] | None, str]:
-    """Shift the aligned model to a local origin, returning the offset applied.
+def _recentre_aligned_model(
+    aligned_dir: Path,
+    lat0: float | None = None,
+    lon0: float | None = None,
+    coordinate_frame: str = "ECEF",
+) -> tuple[list[float] | None, str]:
+    """Shift the aligned model to a local origin and rectify unconstrained 1D flight-line roll.
 
-    Why this is not optional
-    ------------------------
-    ``model_aligner --alignment_type ecef`` writes geocentric coordinates, so a
-    scene sits ~6.4e6 m from the origin. OpenMVS - like most mesh software -
-    stores vertices and does its geometry in **float32**, whose spacing at 5.5e6
-    is *0.5 m*. A 190 m site therefore gets quantised onto a half-metre lattice:
-    facades collapse, triangles become degenerate, and RefineMesh and
-    TextureMesh both die with STATUS_STACK_BUFFER_OVERRUN (0xC0000409). The
-    pipeline then falls back to a 2.5D height field, which is why a capture that
-    passes every quality gate still produces no buildings.
-
-    Shifting to a local origin is exact - a pure translation of doubles - and
-    fully reversible from the recorded offset, which export adds back before
-    projecting. The offset is rounded to whole metres so it stays exactly
-    representable and reads sensibly in a manifest.
-
-    Returns ``(offset, note)``; ``offset`` is None when nothing was applied.
+    1. ``model_aligner --alignment_type ecef`` writes geocentric coordinates (~6.4e6 m),
+       which overflows OpenMVS float32 precision (0.5 m quantum). Shifting to a local
+       origin preserves millimeter precision while recording ``model_offset_m``.
+    2. Single-pass drone videos have camera positions along a 1D curve, leaving roll
+       around the flight path unconstrained in point-only Umeyama alignment. We align
+       the scene's upward surface normal (oriented toward the cameras) with true
+       geodetic UP around the camera centroid so the 3D scene is always upright.
     """
     try:
         import pycolmap
@@ -316,28 +311,73 @@ def _recentre_aligned_model(aligned_dir: Path) -> tuple[list[float] | None, str]
         return None, f"pycolmap unavailable ({type(exc).__name__}); model left at source magnitude"
 
     try:
+        from .terrain import _rotation_aligning
+
         rec = pycolmap.Reconstruction(str(aligned_dir))
         centres = np.array([im.projection_center() for im in rec.images.values()], dtype=float)
         if len(centres) == 0:
             return None, "no registered images to centre on"
 
         offset = np.round(centres.mean(axis=0)).astype(float)
-        # Only worth doing when the magnitude actually threatens float32. A model
-        # already near the origin is left untouched so the frame stays simple.
-        if float(np.abs(offset).max()) < 10_000.0:
-            return None, "model already near the origin; no shift needed"
-
-        rec.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(), -offset))
-        rec.write(str(aligned_dir))
-
         resolution = float(np.spacing(np.float32(np.abs(centres).max())))
-        return [float(v) for v in offset], (
-            f"shifted model to a local origin by {offset.tolist()} m "
-            f"(float32 spacing at source magnitude was {resolution:.3f} m, which "
-            f"is what breaks OpenMVS meshing)"
+        applied_offset: list[float] | None = None
+
+        if float(np.abs(offset).max()) >= 10_000.0:
+            rec.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(), -offset))
+            applied_offset = [float(v) for v in offset]
+            centres = np.array([im.projection_center() for im in rec.images.values()], dtype=float)
+
+        # Gravity-level unconstrained roll around the camera trajectory centroid
+        roll_note = ""
+        pts = np.array([p.xyz for p in rec.points3D.values()], dtype=float)
+        if len(pts) >= 16 and len(centres) >= 3:
+            if coordinate_frame == "ECEF" and lat0 is not None and lon0 is not None:
+                phi = math.radians(float(lat0))
+                lam = math.radians(float(lon0))
+                u_geo = np.array([
+                    math.cos(phi) * math.cos(lam),
+                    math.cos(phi) * math.sin(lam),
+                    math.sin(phi),
+                ], dtype=float)
+            else:
+                u_geo = np.array([0.0, 0.0, 1.0], dtype=float)
+            u_geo /= max(float(np.linalg.norm(u_geo)), 1e-12)
+
+            pts_med = np.median(pts, axis=0)
+            dists = np.linalg.norm(pts - pts_med, axis=1)
+            core_mask = dists <= np.percentile(dists, 90.0)
+            pts_core = pts[core_mask] if int(core_mask.sum()) >= 16 else pts
+            centred = pts_core - np.median(pts_core, axis=0)
+            _, _, vt = np.linalg.svd(centred, full_matrices=False)
+            n_scene = vt[2] / max(float(np.linalg.norm(vt[2])), 1e-12)
+
+            cam_mean = centres.mean(axis=0)
+            ground_to_cam = cam_mean - pts_med
+            if float(np.dot(n_scene, ground_to_cam)) < 0.0:
+                n_scene = -n_scene
+
+            tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
+            if tilt_deg > 5.0:
+                R_level = _rotation_aligning(n_scene, u_geo)
+                t_level = cam_mean - R_level @ cam_mean
+                rec.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(R_level), t_level))
+                roll_note = f"; rectified {tilt_deg:.1f}° flight-line roll to geodetic vertical"
+
+        rec.write(str(aligned_dir))
+        txt_dir = aligned_dir / "txt"
+        txt_dir.mkdir(parents=True, exist_ok=True)
+        rec.write_text(str(txt_dir))
+
+        if applied_offset is None:
+            return None, f"model already near the origin; no shift needed{roll_note}"
+
+        return applied_offset, (
+            f"shifted model to a local origin by {applied_offset} m "
+            f"(float32 spacing at source magnitude was {resolution:.3f} m){roll_note}"
         )
     except Exception as exc:
         return None, f"re-centring failed ({type(exc).__name__}: {exc}); model left as aligned"
+
 
 
 def _undistort_aligned_model(
@@ -541,7 +581,9 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         ctx.note("model_aligner: successfully aligned to GPS coordinates")
         # Re-centre before undistortion, because undistortion is what publishes
         # the model to OpenMVS and OpenMVS cannot survive geocentric magnitudes.
-        model_offset, offset_note = _recentre_aligned_model(aligned_dir)
+        model_offset, offset_note = _recentre_aligned_model(
+            aligned_dir, lat0=lat0, lon0=lon0, coordinate_frame=coordinate_frame
+        )
         ctx.note(offset_note)
         _undistort_aligned_model(colmap, ws, aligned_dir, config)
     else:

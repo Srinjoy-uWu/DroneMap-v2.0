@@ -1590,6 +1590,23 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         ctx.note(f"accuracy report failed: {exc}")
 
     # ------------------------------------------------------------------
+    # Local AI / Deterministic Intelligence & Self-Healing Diagnostics
+    # ------------------------------------------------------------------
+    try:
+        from .agent import analyze_reconstruction_diagnostics, generate_intelligence_report
+
+        intel = generate_intelligence_report(ws)
+        diag = analyze_reconstruction_diagnostics(ws)
+        diag_path = export_dir / "diagnostics_report.json"
+        diag_path.write_text(json.dumps(diag.to_dict(), indent=2), encoding="utf-8")
+        ctx.output(
+            intelligence_report=str(export_dir / "intelligence_report.json"),
+            diagnostics_report=str(diag_path),
+        )
+    except Exception as exc:
+        ctx.note(f"intelligence/diagnostics report skipped: {exc}")
+
+    # ------------------------------------------------------------------
     # Purge intermediates if requested
     # ------------------------------------------------------------------
     if config.purge_intermediates:

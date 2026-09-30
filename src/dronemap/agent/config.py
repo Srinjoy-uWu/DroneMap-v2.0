@@ -1,4 +1,4 @@
-"""Agent configuration and credentials management."""
+"""Agent configuration for Local Ollama SLM and Offline Deterministic Engine."""
 
 from __future__ import annotations
 
@@ -14,52 +14,63 @@ except ImportError:
 
 @dataclass
 class AgentConfig:
-    gemini_api_key: str | None = field(default_factory=lambda: os.environ.get("GEMINI_API_KEY"))
-    openai_api_key: str | None = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY"))
-    anthropic_api_key: str | None = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY"))
+    """Configuration for DroneMap's 100% local/offline Intelligence & Copilot layer.
+
+    Operates with zero external cloud API keys:
+    - ``local``: Uses a local OpenAI/Ollama-compatible SLM server on localhost:11434
+      (automatically launching the built-in Ollama SLM daemon if native ollama.exe is not running)
+    - ``offline``: Uses the deterministic photogrammetric rule engine
+    """
+
+    local_endpoint: str = field(
+        default_factory=lambda: os.environ.get("DRONEMAP_LOCAL_LLM_URL", "http://localhost:11434/v1")
+    )
     preferred_provider: str = field(
         default_factory=lambda: os.environ.get("DRONEMAP_LLM_PROVIDER", "auto").lower()
     )
-    model_name: str | None = field(default_factory=lambda: os.environ.get("DRONEMAP_LLM_MODEL"))
-    timeout_seconds: float = 30.0
+    model_name: str | None = field(default_factory=lambda: os.environ.get("DRONEMAP_LOCAL_MODEL"))
+    timeout_seconds: float = 15.0
     temperature: float = 0.2
+    auto_start_daemon: bool = True
 
-    @property
-    def has_api_keys(self) -> bool:
-        """Return True if at least one LLM API key is present."""
-        return bool(self.gemini_api_key or self.openai_api_key or self.anthropic_api_key)
+    def _is_local_endpoint_alive(self) -> bool:
+        """Fast socket probe to check if a local SLM server (Ollama) is listening on localhost:11434."""
+        import socket
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(self.local_endpoint)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.25)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            if result == 0:
+                return True
+            if self.auto_start_daemon and host in ("127.0.0.1", "localhost") and port == 11434:
+                from .ollama_daemon import ensure_ollama_daemon
+                return ensure_ollama_daemon(port=11434)
+            return False
+        except Exception:
+            return False
 
     @property
     def active_provider(self) -> str:
-        """Determine which provider to use based on available keys and preference."""
-        if not self.has_api_keys or self.preferred_provider == "offline":
+        """Resolve active local/offline provider (`local` or `offline`)."""
+        pref = self.preferred_provider
+        if pref in ("offline", "none", "heuristic", "deterministic"):
             return "offline"
+        if pref in ("local", "ollama", "slm"):
+            return "local"
 
-        if self.preferred_provider in ("gemini", "google") and self.gemini_api_key:
-            return "gemini"
-        if self.preferred_provider == "openai" and self.openai_api_key:
-            return "openai"
-        if self.preferred_provider == "anthropic" and self.anthropic_api_key:
-            return "anthropic"
-
-        # Auto-detection priority: Gemini -> OpenAI -> Anthropic
-        if self.gemini_api_key:
-            return "gemini"
-        if self.openai_api_key:
-            return "openai"
-        if self.anthropic_api_key:
-            return "anthropic"
+        if self._is_local_endpoint_alive():
+            return "local"
         return "offline"
 
     @property
     def default_model(self) -> str:
+        if self.active_provider == "offline":
+            return "offline-deterministic"
         if self.model_name:
             return self.model_name
-        provider = self.active_provider
-        if provider == "gemini":
-            return "gemini-2.5-flash"
-        if provider == "openai":
-            return "gpt-4o-mini"
-        if provider == "anthropic":
-            return "claude-3-5-sonnet-20241022"
-        return "offline-heuristic"
+        return os.environ.get("DRONEMAP_LOCAL_MODEL", "llama3.2:1b")
