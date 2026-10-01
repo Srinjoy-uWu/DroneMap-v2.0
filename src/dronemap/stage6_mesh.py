@@ -333,7 +333,11 @@ def _run_terrain_mesh(
 
     # Clean 3D outliers and rectify unconstrained 1D flight-line roll
     points, colors, clean_stats = rectify_and_clean_dense_cloud(
-        points, colors, up_target=up_hint, camera_centres=cam_centres
+        points,
+        colors,
+        up_target=up_hint,
+        camera_centres=cam_centres,
+        max_tilt_deg=cfg.terrain_max_tilt_deg if is_georef else None,
     )
     if clean_stats["outliers_removed"] > 0 or clean_stats["roll_rectified_deg"] > 0:
         ctx.note(
@@ -471,9 +475,10 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         if s_info.get("sky_points_removed", 0) > 0 or s_info.get("oblique_elevation_rectified"):
             _save_rectified_ply(dense_ply, sem_res.points, sem_res.colors)
 
-        if cfg.mode == "auto" and s_info.get("oblique_elevation_rectified"):
+        pose_verdict = ws.stage("pose").metrics.get("capture_verdict")
+        if cfg.mode == "auto" and s_info.get("oblique_elevation_rectified") and pose_verdict != "accept_3d":
             ctx.note(
-                "Oblique sightline ramp detected and rectified via SegFormer + Depth-Anything-V2; "
+                "Oblique sightline ramp detected on single-pass flight and rectified via SegFormer + Depth-Anything-V2; "
                 "reconstructing 3D structure-preserving mesh from conditioned 3D cloud"
             )
             _run_terrain_mesh(ws, cfg, dense_ply, ctx, preloaded_sem=sem_res)
@@ -514,7 +519,8 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         best_mvs = refined_mvs if (cfg.refine and refined_ply.exists()) else raw_mesh_mvs
     else:
         ctx.note("running ReconstructMesh")
-        n_dense_pts = _count_ply_elements(dense_ply).get("vertex", 0)
+        ply_for_openmvs = raw_ply if (raw_ply.exists() and _count_ply_elements(raw_ply).get("vertex", 0) > 0) else dense_ply
+        n_dense_pts = _count_ply_elements(ply_for_openmvs).get("vertex", 0)
         if n_dense_pts < 50:
             raise RuntimeError(
                 f"Dense point cloud has only {n_dense_pts} points, which is insufficient for 3D surface reconstruction. "
@@ -527,7 +533,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                 [
                     str(dense_mvs),
                     "--working-folder", str(ws.mesh_dir),
-                    "-p", str(dense_ply),
+                    "-p", str(ply_for_openmvs),
                     "-o", str(raw_mesh_mvs),
                     "--min-point-distance", str(cfg.min_point_distance),
                     "--decimate", str(cfg.decimate),
@@ -538,6 +544,12 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         except Exception as exc:
             ctx.note(f"ReconstructMesh with -p failed ({exc}), retrying without point cloud override...")
             try:
+                if raw_ply.exists():
+                    import shutil
+                    try:
+                        shutil.copy2(raw_ply, dense_ply)
+                    except Exception:
+                        pass
                 openmvs.run(
                     "ReconstructMesh",
                     [

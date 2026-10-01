@@ -58,6 +58,7 @@ def rectify_and_clean_dense_cloud(
     camera_centres: np.ndarray | None = None,
     knn: int = 16,
     std_ratio: float = 2.2,
+    max_tilt_deg: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
     """Remove 3D floating outliers and rectify unconstrained flight-line roll.
 
@@ -113,22 +114,37 @@ def rectify_and_clean_dense_cloud(
         if is_isotropic_thin_sheet:
             n_scene = vt[2].copy()
             n_scene /= max(float(np.linalg.norm(n_scene)), 1e-12)
-            if camera_centres is not None and len(camera_centres) > 0:
-                cam_vec = np.mean(np.asarray(camera_centres, dtype=np.float64), axis=0) - med
-                if float(np.dot(n_scene, cam_vec)) < 0.0:
+            if max_tilt_deg is not None:
+                # In georeferenced runs with an explicit tilt limit, surface normal
+                # must align with vertical prior u_geo (resolving SVD eigenvector sign ambiguity)
+                if float(np.dot(n_scene, u_geo)) < 0.0:
                     n_scene = -n_scene
-            elif float(np.dot(n_scene, u_geo)) < 0.0:
+                tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
+                if 3.0 < tilt_deg <= max_tilt_deg:
+                    R_fix = _rotation_aligning(n_scene, u_geo)
+                    pts = (pts - med) @ R_fix.T + med
+                    roll_rectified_deg = round(tilt_deg, 2)
+            else:
+                # Unconstrained / arbitrary coordinate systems: orient towards camera centers
+                if camera_centres is not None and len(camera_centres) > 0:
+                    cam_vec = np.mean(np.asarray(camera_centres, dtype=np.float64), axis=0) - med
+                    if float(np.dot(n_scene, cam_vec)) < 0.0:
+                        n_scene = -n_scene
+                elif float(np.dot(n_scene, u_geo)) < 0.0:
+                    n_scene = -n_scene
+                tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
+                if tilt_deg > 12.0:
+                    R_fix = _rotation_aligning(n_scene, u_geo)
+                    pts = (pts - med) @ R_fix.T + med
+                    roll_rectified_deg = round(tilt_deg, 2)
+        else:
+            plane = fit_ground_plane(pts, up_hint=u_geo, max_tilt_deg=max_tilt_deg or 15.0)
+            n_scene = plane.normal
+            if float(np.dot(n_scene, u_geo)) < 0.0:
                 n_scene = -n_scene
             tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
-            if tilt_deg > 12.0:
-                R_fix = _rotation_aligning(n_scene, u_geo)
-                pts = (pts - med) @ R_fix.T + med
-                roll_rectified_deg = round(tilt_deg, 2)
-        else:
-            plane = fit_ground_plane(pts, up_hint=u_geo, max_tilt_deg=15.0)
-            n_scene = plane.normal
-            tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
-            if 3.0 < tilt_deg <= 15.0:
+            max_limit = max_tilt_deg if max_tilt_deg is not None else 15.0
+            if 3.0 < tilt_deg <= max_limit:
                 R_fix = _rotation_aligning(n_scene, u_geo)
                 pts = (pts - med) @ R_fix.T + med
                 roll_rectified_deg = round(tilt_deg, 2)

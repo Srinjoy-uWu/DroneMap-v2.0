@@ -652,12 +652,23 @@ def condition_and_classify_3d_cloud(
         else 5.0
     )
 
+    pose_verdict = None
+    try:
+        pose_stage = ws.stage("pose")
+        if pose_stage:
+            pose_verdict = pose_stage.metrics.get("capture_verdict")
+    except Exception:
+        pass
+
+    is_accepted_3d = pose_verdict == "accept_3d"
+
     oblique_ramp_detected = bool(
         projected_any
+        and not is_accepted_3d
         and (
-            water_iqr > 2.5
-            or corr_zv > 0.68
-            or (int(struct_mask.sum()) >= 100 and struct_prominence < 1.5)
+            (water_iqr > 2.5 and int(water_mask.sum()) >= 50)
+            or (corr_zv > 0.68 and water_iqr > 1.2)
+            or (int(struct_mask.sum()) >= 100 and struct_prominence < 1.5 and water_iqr > 1.2)
         )
     )
 
