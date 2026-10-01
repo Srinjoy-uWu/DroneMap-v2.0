@@ -464,25 +464,28 @@ if (!canvas) {
 
   // AI Copilot 3D Spatial Actions
   window.triggerViewerAction = (action) => {
-    if (!action || !currentModel) return;
-    if (action.type === 'highlight_confidence') {
+    if (!action) return;
+    if (action.type === 'fit_view') {
+      if (btnReset) btnReset.click();
+      return;
+    }
+    if (!currentModel) return;
+    const highlightColor = action.type === 'highlight_confidence' ? 0x3fb950
+                         : action.type === 'toggle_masks' ? 0xf85149
+                         : null;
+    if (highlightColor != null) {
       currentModel.traverse((child) => {
         if (child.isMesh && child.material) {
-          const origColor = child.material.color ? child.material.color.clone() : new THREE.Color(0xffffff);
-          child.material.color = new THREE.Color(0x3fb950);
-          setTimeout(() => {
-            if (child.material) child.material.color = origColor;
-          }, 2500);
-        }
-      });
-    } else if (action.type === 'toggle_masks') {
-      currentModel.traverse((child) => {
-        if (child.isMesh && child.material) {
-          const origColor = child.material.color ? child.material.color.clone() : new THREE.Color(0xffffff);
-          child.material.color = new THREE.Color(0xf85149);
-          setTimeout(() => {
-            if (child.material) child.material.color = origColor;
-          }, 2500);
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach((mat) => {
+            if (mat && mat.color) {
+              const orig = mat.color.clone();
+              mat.color.setHex(highlightColor);
+              setTimeout(() => {
+                if (mat && mat.color) mat.color.copy(orig);
+              }, 2500);
+            }
+          });
         }
       });
     }

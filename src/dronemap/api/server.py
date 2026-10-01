@@ -573,10 +573,18 @@ def _resolve_workspace(run_id: str) -> Any | None:
             pass
     runs = RunWorkspace.list_runs(_data_root)
     if runs:
-        try:
-            return RunWorkspace.open(_data_root, runs[-1])
-        except Exception:
-            pass
+        runs_dir = _data_root / "runs"
+        # Sort by modification time descending so latest run is preferred
+        sorted_runs = sorted(
+            runs,
+            key=lambda r: (runs_dir / r).stat().st_mtime if (runs_dir / r).exists() else 0,
+            reverse=True,
+        )
+        for r in sorted_runs:
+            try:
+                return RunWorkspace.open(_data_root, r)
+            except Exception:
+                continue
     return None
 
 
@@ -623,6 +631,21 @@ def get_diagnostics(run_id: str) -> dict[str, Any]:
     return report.to_dict()
 
 
+def _find_mask_previews_dir(ws: Any) -> Path | None:
+    candidates = [
+        ws.masks_dir / "previews",
+        ws.stage_dir("masks") / "previews",
+        ws.stage_dir("masks") / "masks" / "previews",
+    ]
+    for c in candidates:
+        if c.exists() and any(c.glob("*.jpg")):
+            return c
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
 @app.get("/api/runs/{run_id}/stages")
 def get_stages_audit(run_id: str) -> dict[str, Any]:
     """Retrieve stage-by-stage execution metrics, Before/After data, and artifact paths."""
@@ -633,8 +656,8 @@ def get_stages_audit(run_id: str) -> dict[str, Any]:
     manifest = ws.manifest
     stages = manifest.get("stages", {})
 
-    previews_dir = ws.masks_dir / "previews"
-    preview_files = [p.name for p in sorted(previews_dir.glob("*.jpg"))] if previews_dir.exists() else []
+    previews_dir = _find_mask_previews_dir(ws)
+    preview_files = [p.name for p in sorted(previews_dir.glob("*.jpg"))] if previews_dir else []
 
     return {
         "run_id": ws.run_id,
@@ -648,17 +671,16 @@ def get_stages_audit(run_id: str) -> dict[str, Any]:
 
 @app.get("/api/runs/{run_id}/masks/preview/{filename}")
 def get_mask_preview(run_id: str, filename: str) -> FileResponse:
-    """Serve dynamic masking Before vs After overlay thumbnails."""
-    from ..workspace import RunWorkspace
-    try:
-        ws = RunWorkspace.open(_data_root, run_id)
-    except FileNotFoundError:
+    ws = _resolve_workspace(run_id)
+    if ws is None:
         raise HTTPException(status_code=404, detail=f"run {run_id!r} not found")
-
-    p = ws.masks_dir / "previews" / filename
+    previews_dir = _find_mask_previews_dir(ws)
+    if not previews_dir:
+        raise HTTPException(status_code=404, detail="preview directory not found")
+    p = previews_dir / filename
     if not p.exists():
-        raise HTTPException(status_code=404, detail=f"preview {filename!r} not found")
-    return FileResponse(str(p), media_type="image/jpeg", filename=filename)
+        raise HTTPException(status_code=404, detail="preview not found")
+    return FileResponse(p, media_type="image/jpeg", filename=filename)
 
 
 # ---------------------------------------------------------------------------
