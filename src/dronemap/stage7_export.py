@@ -366,6 +366,34 @@ def _viewer_frame_transform(
         [0.0, -1.0, 0.0],
     ], dtype=np.float64)
     rot = enu_to_gltf @ ecef_to_enu
+
+    # Ensure the model is upright in the viewer's Y-up frame.
+    # In a drone survey, the drone camera is ALWAYS elevated in the air ABOVE the terrain,
+    # and structures sit upright extending upward into the sky (+Y).
+    # If camera Y < points Y, the model has been inverted by flight-line roll ambiguity.
+    # We resolve this by applying a 180° rotation around the glTF Z-axis (heading),
+    # which flips Y (upward) and X (chirality) while preserving Z (heading).
+    is_upside_down = False
+    if ws is not None:
+        try:
+            import pycolmap
+            rec_dir = ws.georef_sparse_dir if ws.georef_sparse_dir.exists() else ws.sparse_dir / "0"
+            if rec_dir.exists():
+                rec = pycolmap.Reconstruction(str(rec_dir))
+                centres = np.array([im.projection_center() for im in rec.images.values()])
+                pts = np.array([p.xyz for p in rec.points3D.values()])
+                if len(centres) > 0 and len(pts) > 0:
+                    cam_y = float((centres @ rot.T)[:, 1].mean())
+                    pts_y = float(np.median((pts @ rot.T)[:, 1]))
+                    if cam_y < pts_y:
+                        is_upside_down = True
+        except Exception:
+            pass
+
+    if is_upside_down:
+        R_unroll = np.diag([-1.0, -1.0, 1.0])
+        rot = R_unroll @ rot
+
     info = {
         "applied": True,
         "frame": "local ENU, glTF Y-up (x=east, y=up, z=-north)",
@@ -527,6 +555,28 @@ def _write_glb(obj_path: Path, out_path: Path, rotation: np.ndarray | None = Non
         _bake_into_scene(scene, shift)
     else:
         recentre = np.zeros(3)
+
+    # Final geometric integrity check on the mesh vertices directly:
+    # In a terrestrial drone reconstruction, the ground plane contains the bulk of vertices
+    # and sits at the base, while structures (towers, buildings, trees) extend upwards into +Y.
+    # If the median vertex Y is near the top of the bounding box while a narrow tower/spire
+    # extends down into negative Y, the mesh is hanging upside down from the sky.
+    # Invert Y and X (180° rotation around Z) to guarantee the model stands upright.
+    try:
+        all_verts = np.concatenate([
+            np.asarray(g.vertices) for g in scene.geometry.values()
+            if hasattr(g, "vertices") and len(g.vertices) > 0
+        ], axis=0) if scene.geometry else None
+        if all_verts is not None and len(all_verts) > 100:
+            median_y = float(np.median(all_verts[:, 1]))
+            min_y = float(all_verts[:, 1].min())
+            max_y = float(all_verts[:, 1].max())
+            span_y = max_y - min_y
+            if span_y > 1.0 and (median_y - min_y) > 1.5 * (max_y - median_y) and median_y > (min_y + max_y) / 2.0:
+                shift_flip = np.diag([-1.0, -1.0, 1.0, 1.0])
+                _bake_into_scene(scene, shift_flip)
+    except Exception:
+        pass
 
     scene.export(str(out_path))
 

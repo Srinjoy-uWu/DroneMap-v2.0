@@ -345,18 +345,36 @@ def _recentre_aligned_model(
                 u_geo = np.array([0.0, 0.0, 1.0], dtype=float)
             u_geo /= max(float(np.linalg.norm(u_geo)), 1e-12)
 
+            cam_mean = centres.mean(axis=0)
+            pts_mean = pts.mean(axis=0)
+
+            # In a drone survey, the drone camera is ALWAYS elevated in the air ABOVE the terrain.
+            # If camera elevation < points elevation, Umeyama alignment picked the 180° inverted roll solution.
+            diff = cam_mean - pts_mean
+            if np.dot(diff, u_geo) < 0:
+                traj = centres - cam_mean
+                _, _, vt = np.linalg.svd(traj)
+                v_flight = vt[0] / max(float(np.linalg.norm(vt[0])), 1e-12)
+                from scipy.spatial.transform import Rotation
+                R_flip = Rotation.from_rotvec(v_flight * np.pi).as_matrix()
+                t_flip = cam_mean - R_flip @ cam_mean
+                rec.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(R_flip), t_flip))
+                roll_note += "; resolved 180° flight-line roll inversion to geodetic upright"
+                centres = np.array([im.projection_center() for im in rec.images.values()], dtype=float)
+                pts = np.array([p.xyz for p in rec.points3D.values()], dtype=float)
+                cam_mean = centres.mean(axis=0)
+
             cam_up = compute_camera_up_vector(aligned_dir, keyframes=keyframes)
             prior_up = cam_up if cam_up is not None else u_geo
             plane = fit_ground_plane(pts, up_hint=prior_up, max_tilt_deg=15.0)
             n_scene = plane.normal
 
-            cam_mean = centres.mean(axis=0)
             tilt_deg = math.degrees(math.acos(float(np.clip(np.dot(n_scene, u_geo), -1.0, 1.0))))
             if 2.5 < tilt_deg <= 35.0:
                 R_level = _rotation_aligning(n_scene, u_geo)
                 t_level = cam_mean - R_level @ cam_mean
                 rec.transform(pycolmap.Sim3d(1.0, pycolmap.Rotation3d(R_level), t_level))
-                roll_note = f"; rectified {tilt_deg:.1f}° flight-line roll to geodetic vertical"
+                roll_note += f"; rectified {tilt_deg:.1f}° flight-line roll to geodetic vertical"
 
         rec.write(str(aligned_dir))
         txt_dir = aligned_dir / "txt"

@@ -203,12 +203,11 @@ class GeorefConfig(BaseModel):
 class DenseConfig(BaseModel):
     """Stage 5 - OpenMVS dense point cloud."""
 
-    # 0 = full resolution. 1 halves it. On a 6 GB / 16 GB laptop, 1 is the
-    # sweet spot; densification is RAM-bound rather than VRAM-bound.
+    # 0 = full resolution. 1 halves it.
     resolution_level: int = 1
-    max_resolution: int = 1920
-    number_views: int = 6
-    number_views_fuse: int = 3
+    max_resolution: int = 2560
+    number_views: int = 8
+    number_views_fuse: int = 2
     estimate_colors: int = 2
     estimate_normals: int = 2
     # Below this count OpenMVS results are usually sparse artifacts rather
@@ -222,7 +221,7 @@ class MeshConfig(BaseModel):
 
     mode: Literal["auto", "openmvs", "terrain_2.5d"] = "auto"
     refine: bool = True
-    min_point_distance: float = 2.5
+    min_point_distance: float = 1.0
     decimate: float = 1.0
     texture_size: int = 8192
     # RefineMesh is the slowest step by far; skip it when iterating.
