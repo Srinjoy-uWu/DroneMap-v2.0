@@ -1620,6 +1620,26 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             elif alt_path.exists():
                 alt_path.unlink(missing_ok=True)
 
+            # Export seam-levelled 3D mesh as model_3d_seam.glb
+            obj_seam = ws.stage("mesh").outputs.get("textured_obj_3d_seam")
+            if not obj_seam and alt_recorded and ws.stage("mesh").outputs.get("textured_obj_alt_label") == "seam_levelled":
+                obj_seam = alt_recorded
+            if not obj_seam:
+                cand_seam = ws.mesh_dir / "scene_dense_mesh_clean_texture.obj"
+                cand_nolevel = ws.mesh_dir / "scene_dense_mesh_clean_texture_nolevel.obj"
+                if cand_seam.exists() and cand_nolevel.exists():
+                    obj_seam = str(cand_seam)
+            if obj_seam and Path(obj_seam).exists():
+                glb_seam = export_dir / "model_3d_seam.glb"
+                try:
+                    _write_glb(Path(obj_seam), glb_seam, rotation)
+                    ctx.output(model_3d_seam_glb=str(glb_seam))
+                    ctx.note(
+                        "exported seam-levelled 3D mesh as model_3d_seam.glb for side-by-side comparison"
+                    )
+                except Exception as e_seam:
+                    ctx.note(f"seam-levelled GLB export note: {e_seam}")
+
             obj_2_5d = ws.stage("mesh").outputs.get("textured_obj_2_5d")
             if obj_2_5d and Path(obj_2_5d).exists():
                 glb_2_5d = export_dir / "model_2_5d.glb"

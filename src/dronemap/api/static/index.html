@@ -208,6 +208,21 @@
 
       <div class="toolbar-divider"></div>
 
+      <!-- Model selection: 3D Vivid, 3D Seam-Levelled, 2.5D Terrain -->
+      <div class="toolbar-group" id="grp-model-type">
+        <button id="btn-model-3d" class="tool-btn active" title="Full 3D Photogrammetric Mesh (Vivid True-Color)">
+          3D Vivid
+        </button>
+        <button id="btn-model-3d-seam" class="tool-btn" title="Full 3D Mesh with OpenMVS Poisson Seam-Leveling">
+          3D Seam-Levelled
+        </button>
+        <button id="btn-model-25d" class="tool-btn" title="Levelled &amp; Smoothed 2.5D Delaunay Terrain Surface">
+          2.5D Terrain
+        </button>
+      </div>
+
+      <div class="toolbar-divider" id="div-model-type"></div>
+
       <!-- Shown only when stage 6 produced two texture variants for this run.
            Same geometry, different atlas: one blended with OpenMVS seam
            levelling, one without it. -->

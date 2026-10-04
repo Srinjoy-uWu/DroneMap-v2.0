@@ -845,6 +845,8 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     if alt_obj is not None:
         outputs["textured_obj_alt"] = str(alt_obj)
         outputs["textured_obj_alt_label"] = alt_label or "alternate"
+        if alt_label == "seam_levelled":
+            outputs["textured_obj_3d_seam"] = str(alt_obj)
     elif terrain_obj.exists():
         outputs["textured_obj_alt"] = str(terrain_obj)
         outputs["textured_obj_alt_label"] = "terrain_2.5d"

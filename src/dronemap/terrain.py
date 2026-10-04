@@ -474,7 +474,7 @@ def reconstruct_terrain_mesh(
         g_acc = np.bincount(lin_idx, weights=val_colors[:, 1], minlength=tex_res * tex_res)
         b_acc = np.bincount(lin_idx, weights=val_colors[:, 2], minlength=tex_res * tex_res)
 
-        tex_flat = np.full((tex_res * tex_res, 3), 160, dtype=np.uint8)
+        tex_flat = np.zeros((tex_res * tex_res, 3), dtype=np.uint8)
         tex_flat[has_sample, 0] = np.clip(r_acc[has_sample] / count[has_sample], 0, 255).astype(np.uint8)
         tex_flat[has_sample, 1] = np.clip(g_acc[has_sample] / count[has_sample], 0, 255).astype(np.uint8)
         tex_flat[has_sample, 2] = np.clip(b_acc[has_sample] / count[has_sample], 0, 255).astype(np.uint8)
@@ -482,19 +482,12 @@ def reconstruct_terrain_mesh(
         tex_img = tex_flat.reshape((tex_res, tex_res, 3))
         tex_mask = (has_sample.reshape((tex_res, tex_res))).astype(np.uint8) * 255
 
-        # Multi-scale full-resolution dilation: NEVER downsamples to 256x256,
-        # ensuring 100% 4K/8K razor-sharp texture clarity across middle and edge areas.
-        kernel5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        dil1 = cv2.dilate(tex_img, kernel5, iterations=2)
-        tex_filled = np.where(tex_mask[:, :, None] > 0, tex_img, dil1)
-
-        mask_dil1 = cv2.dilate(tex_mask, kernel5, iterations=2)
-        if int((mask_dil1 == 0).sum()) > 0:
-            kernel7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-            dil2 = cv2.dilate(tex_filled, kernel7, iterations=3)
-            tex_img = np.where(mask_dil1[:, :, None] > 0, tex_filled, dil2)
-        else:
-            tex_img = tex_filled
+        # Exact nearest-neighbor hole filling: every unpopulated pixel inherits the true
+        # color of the closest point return. Zero artificial grey/white bleach, zero fading!
+        unpop = (tex_mask == 0)
+        if np.any(unpop):
+            _, (ny_map, nx_map) = scipy.ndimage.distance_transform_edt(unpop, return_indices=True)
+            tex_img = tex_img[ny_map, nx_map]
     else:
         tex_img = np.full((tex_res, tex_res, 3), 180, dtype=np.uint8)
 

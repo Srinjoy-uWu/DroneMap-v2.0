@@ -310,12 +310,31 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   window.selectRun = selectRun;
 
-  // The texture-variant toggle exists only for runs that actually produced two
-  // atlases. Offering it unconditionally would give a button that 404s, which
-  // is worse than not offering it at all.
+  // The texture and model selectors exist so the user can switch between 3D vivid,
+  // 3D seam-levelled, and 2.5D terrain surface models dynamically.
   async function showTextureVariantToggle(runId) {
     const grp = document.getElementById('grp-texture-variant');
     const div = document.getElementById('div-texture-variant');
+    const grpModel = document.getElementById('grp-model-type');
+    const divModel = document.getElementById('div-model-type');
+    const btnModel3D = document.getElementById('btn-model-3d');
+    const btnModel3DSeam = document.getElementById('btn-model-3d-seam');
+    const btnModel25D = document.getElementById('btn-model-25d');
+
+    if (grpModel) grpModel.style.display = '';
+    if (divModel) divModel.style.display = '';
+
+    // Probe available models for this run
+    try {
+      const [resSeam, res25D] = await Promise.all([
+        fetch(`/api/runs/${runId}/model_3d_seam.glb`, { method: 'HEAD' }),
+        fetch(`/api/runs/${runId}/model_2_5d.glb`, { method: 'HEAD' }),
+      ]);
+      if (btnModel3D) btnModel3D.style.display = '';
+      if (btnModel3DSeam) btnModel3DSeam.style.display = resSeam.ok ? '' : 'none';
+      if (btnModel25D) btnModel25D.style.display = res25D.ok ? '' : 'none';
+    } catch (_) {}
+
     const show = (on) => {
       if (grp) grp.style.display = on ? '' : 'none';
       if (div) div.style.display = on ? '' : 'none';
@@ -491,10 +510,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const links = [];
       links.push(`<a class="dl-btn dl-btn-primary" href="/api/runs/${runId}/report.html" target="_blank">Full Report (HTML)</a>`);
-      if (exportOutputs.model_glb) {
-        links.push(`<a class="dl-btn" href="/api/runs/${runId}/model.glb" download>3D Model (.glb)</a>`);
+      if (exportOutputs.model_glb || exportOutputs.model_3d_glb) {
+        links.push(`<a class="dl-btn" href="/api/runs/${runId}/model_3d.glb" download>3D Model — Vivid True-Color (.glb)</a>`);
       }
-      if (exportOutputs.model_alt_glb) {
+      if (exportOutputs.model_3d_seam_glb || exportOutputs.model_alt_label === 'seam_levelled') {
+        links.push(`<a class="dl-btn" href="/api/runs/${runId}/model_3d_seam.glb" download>3D Model — Seam-Levelled (.glb)</a>`);
+      }
+      if (exportOutputs.model_2_5d_glb || exportOutputs.model_alt_label === 'terrain_2.5d') {
+        links.push(`<a class="dl-btn" href="/api/runs/${runId}/model_2_5d.glb" download>2.5D Leveled Terrain (.glb)</a>`);
+      }
+      if (exportOutputs.model_alt_glb && !exportOutputs.model_2_5d_glb && !exportOutputs.model_3d_seam_glb) {
         const variant = (exportOutputs.model_alt_label || 'alternate').replace(/_/g, ' ');
         links.push(`<a class="dl-btn" href="/api/runs/${runId}/model_alt.glb" download>3D Model — ${variant} texture (.glb)</a>`);
       }

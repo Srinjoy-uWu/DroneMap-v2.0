@@ -393,7 +393,11 @@ def list_runs(all: bool = False) -> JSONResponse:
             "status_type": status_type,
             # A run that produced two texture variants can be compared in the
             # viewer; one that did not must not offer a toggle that 404s.
+            # Available model variants
             "has_alt_model": (_run_export_dir(run_dir.name) / "model_alt.glb").exists(),
+            "has_model_3d": (_run_export_dir(run_dir.name) / "model_3d.glb").exists(),
+            "has_model_3d_seam": (_run_export_dir(run_dir.name) / "model_3d_seam.glb").exists(),
+            "has_model_2_5d": (_run_export_dir(run_dir.name) / "model_2_5d.glb").exists(),
         })
     return JSONResponse(runs)
 
@@ -456,6 +460,21 @@ def get_model_3d_glb(run_id: str) -> FileResponse:
         str(target),
         media_type="model/gltf-binary",
         filename="model_3d.glb",
+    )
+
+
+@app.api_route("/api/runs/{run_id}/model_3d_seam.glb", methods=["GET", "HEAD"])
+def get_model_3d_seam_glb(run_id: str) -> FileResponse:
+    """Dedicated full 3D OpenMVS mesh model with seam levelling."""
+    target = _run_export_dir(run_id) / "model_3d_seam.glb"
+    if not target.exists():
+        target = _run_export_dir(run_id) / "model_alt.glb"
+    if not target.exists():
+        target = _run_export_dir(run_id) / "model.glb"
+    return FileResponse(
+        str(target),
+        media_type="model/gltf-binary",
+        filename="model_3d_seam.glb",
     )
 
 

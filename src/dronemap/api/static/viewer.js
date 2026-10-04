@@ -38,8 +38,8 @@ if (!canvas) {
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.LinearToneMapping;
-  renderer.toneMappingExposure = 1.25;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
 
   const scene = new THREE.Scene();
   // Clean neutral dark background
@@ -54,22 +54,22 @@ if (!canvas) {
   controls.maxDistance = 6000;
   controls.minDistance = 0.5;
 
-  // Balanced Photogrammetric Sun & Fill Lighting
-  const ambient = new THREE.AmbientLight(0xffffff, 1.2);
+  // Balanced Photogrammetric Sun & Fill Lighting - avoids highlight blowout & bleached haze
+  const ambient = new THREE.AmbientLight(0xffffff, 0.65);
   scene.add(ambient);
 
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x475569, 1.0);
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.45);
   scene.add(hemi);
 
-  const sun1 = new THREE.DirectionalLight(0xffffff, 1.1);
+  const sun1 = new THREE.DirectionalLight(0xffffff, 0.85);
   sun1.position.set(120, 220, 100);
   scene.add(sun1);
 
-  const sun2 = new THREE.DirectionalLight(0xffffff, 0.8);
+  const sun2 = new THREE.DirectionalLight(0xffffff, 0.45);
   sun2.position.set(-120, 160, -100);
   scene.add(sun2);
 
-  const underFill = new THREE.DirectionalLight(0xffffff, 0.5);
+  const underFill = new THREE.DirectionalLight(0xffffff, 0.25);
   underFill.position.set(0, -100, 0);
   scene.add(underFill);
 
@@ -178,16 +178,37 @@ if (!canvas) {
   // the artefact (a dark mesh crossed by coloured lines) can be compared
   // directly against the corrected one rather than described.
   window.load3DModel = function(runId, variant) {
-    variant = variant === 'alt' ? 'alt' : 'primary';
+    if (!variant) variant = 'primary';
     window.currentVariant = variant;
-    const assetUrl = (variant === 'alt'
-      ? `/api/runs/${runId}/model_alt.glb`
-      : `/api/runs/${runId}/model.glb`) + `?v=${Date.now()}`;
+    let assetUrl;
+    if (variant === '3d_seam') {
+      assetUrl = `/api/runs/${runId}/model_3d_seam.glb`;
+    } else if (variant === '2_5d' || variant === 'terrain') {
+      assetUrl = `/api/runs/${runId}/model_2_5d.glb`;
+    } else if (variant === 'alt') {
+      assetUrl = `/api/runs/${runId}/model_alt.glb`;
+    } else if (variant === '3d') {
+      assetUrl = `/api/runs/${runId}/model_3d.glb`;
+    } else {
+      assetUrl = `/api/runs/${runId}/model.glb`;
+    }
+    assetUrl += `?v=${Date.now()}`;
 
     const btnPrimary = document.getElementById('btn-variant-primary');
     const btnAlt = document.getElementById('btn-variant-alt');
+    const btn3D = document.getElementById('btn-model-3d');
+    const btn3DSeam = document.getElementById('btn-model-3d-seam');
+    const btn25D = document.getElementById('btn-model-25d');
+
+    const is3D = variant === '3d' || variant === 'primary';
+    const is3DSeam = variant === '3d_seam';
+    const is25D = variant === '2_5d' || variant === 'terrain';
+
     if (btnPrimary) btnPrimary.classList.toggle('active', variant === 'primary');
     if (btnAlt) btnAlt.classList.toggle('active', variant === 'alt');
+    if (btn3D) btn3D.classList.toggle('active', is3D);
+    if (btn3DSeam) btn3DSeam.classList.toggle('active', is3DSeam);
+    if (btn25D) btn25D.classList.toggle('active', is25D);
 
     if (currentModel) {
       scene.remove(currentModel);
@@ -235,8 +256,8 @@ if (!canvas) {
             if (child.material) {
               child.material.side = THREE.DoubleSide;
               child.material.shadowSide = THREE.DoubleSide;
-              child.material.roughness = 0.9;
-              child.material.metalness = 0.0;
+              child.material.roughness = 0.8;
+              child.material.metalness = 0.05;
               if (child.geometry && child.geometry.attributes.color) {
                 child.material.vertexColors = true;
                 child.userData.hasVertexColors = true;
@@ -417,6 +438,10 @@ if (!canvas) {
 
   const btnVariantPrimary = document.getElementById('btn-variant-primary');
   const btnVariantAlt = document.getElementById('btn-variant-alt');
+  const btnModel3D = document.getElementById('btn-model-3d');
+  const btnModel3DSeam = document.getElementById('btn-model-3d-seam');
+  const btnModel25D = document.getElementById('btn-model-25d');
+
   if (btnVariantPrimary) {
     btnVariantPrimary.addEventListener('click', () => {
       if (window.currentRunId) window.load3DModel(window.currentRunId, 'primary');
@@ -425,6 +450,21 @@ if (!canvas) {
   if (btnVariantAlt) {
     btnVariantAlt.addEventListener('click', () => {
       if (window.currentRunId) window.load3DModel(window.currentRunId, 'alt');
+    });
+  }
+  if (btnModel3D) {
+    btnModel3D.addEventListener('click', () => {
+      if (window.currentRunId) window.load3DModel(window.currentRunId, '3d');
+    });
+  }
+  if (btnModel3DSeam) {
+    btnModel3DSeam.addEventListener('click', () => {
+      if (window.currentRunId) window.load3DModel(window.currentRunId, '3d_seam');
+    });
+  }
+  if (btnModel25D) {
+    btnModel25D.addEventListener('click', () => {
+      if (window.currentRunId) window.load3DModel(window.currentRunId, '2_5d');
     });
   }
 
