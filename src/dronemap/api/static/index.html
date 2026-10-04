@@ -181,6 +181,34 @@
       </div>
     </div>
 
+    <!-- Semantic AI Distinct Features Floating Legend -->
+    <div id="semantic-legend" class="floating-card" style="display:none">
+      <div class="card-header">
+        <span class="card-title">Distinct Features (AI)</span>
+        <button id="btn-close-semantic-legend" class="btn-close-tiny">&times;</button>
+      </div>
+      <div class="legend-items">
+        <div class="legend-item"><span class="legend-swatch" style="background:#3b4252"></span> <strong>Road / Asphalt</strong></div>
+        <div class="legend-item"><span class="legend-swatch" style="background:#e11d48"></span> <strong>Houses / Buildings</strong></div>
+        <div class="legend-item"><span class="legend-swatch" style="background:#16a34a"></span> <strong>Trees / Vegetation</strong></div>
+        <div class="legend-item"><span class="legend-swatch" style="background:#d97706"></span> <strong>Terrain / Ground</strong></div>
+        <div class="legend-item"><span class="legend-swatch" style="background:#06b6d4"></span> <strong>Poles / Objects</strong></div>
+      </div>
+    </div>
+
+    <!-- Height Map Elevation Relief Floating Legend -->
+    <div id="height-legend" class="floating-card" style="display:none">
+      <div class="card-header">
+        <span class="card-title">Elevation Relief</span>
+        <button id="btn-close-height-legend" class="btn-close-tiny">&times;</button>
+      </div>
+      <div class="height-gradient-bar"></div>
+      <div class="height-labels">
+        <span>Low (Roads / Valleys)</span>
+        <span>High (Roofs / Hills)</span>
+      </div>
+    </div>
+
     <!-- Viewport Bottom Control Toolbar -->
     <nav id="toolbar">
       <div class="toolbar-group">
@@ -198,10 +226,16 @@
       <div class="toolbar-divider"></div>
 
       <div class="toolbar-group">
-        <button id="btn-shade-textured" class="tool-btn active" title="Show photo textures">
+        <button id="btn-shade-textured" class="tool-btn active" title="Show photorealistic textures with micro-contrast">
           Textured
         </button>
-        <button id="btn-shade-white" class="tool-btn" title="Show clean white surface">
+        <button id="btn-shade-semantic" class="tool-btn" title="Distinguish road, houses, trees, terrain, and objects">
+          Distinct AI
+        </button>
+        <button id="btn-shade-height" class="tool-btn" title="Distinguish elevation heights and terrain contours">
+          Height Map
+        </button>
+        <button id="btn-shade-white" class="tool-btn" title="Show clean clay geometry">
           Clay Mode
         </button>
       </div>
@@ -222,20 +256,6 @@
       </div>
 
       <div class="toolbar-divider" id="div-model-type"></div>
-
-      <!-- Shown only when stage 6 produced two texture variants for this run.
-           Same geometry, different atlas: one blended with OpenMVS seam
-           levelling, one without it. -->
-      <div class="toolbar-group" id="grp-texture-variant" style="display:none">
-        <button id="btn-variant-primary" class="tool-btn active" title="The texture variant the pipeline measured as better">
-          Texture A
-        </button>
-        <button id="btn-variant-alt" class="tool-btn" title="The other texture variant, kept for comparison">
-          Texture B
-        </button>
-      </div>
-
-      <div class="toolbar-divider" id="div-texture-variant" style="display:none"></div>
 
       <div class="toolbar-group">
         <label class="toolbar-toggle" title="Show 3D mesh lines">

@@ -545,6 +545,41 @@ body {
   color: var(--text-main);
 }
 
+/* Distinct Feature & Height Map Legends */
+.legend-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #e2e8f0;
+}
+.legend-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  border: 1px solid rgba(255,255,255,0.2);
+}
+.height-gradient-bar {
+  height: 12px;
+  border-radius: 3px;
+  background: linear-gradient(to right, #30123b, #1ae4b6, #a2fc3c, #fb8022, #7a0403);
+  margin: 10px 0 6px;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+.height-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
 /* Bottom Control Toolbar */
 #toolbar {
   position: absolute;

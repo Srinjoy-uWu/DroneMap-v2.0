@@ -453,3 +453,78 @@ def test_terrain_flattens_roads_and_despikes_trees(tmp_path: Path):
     assert np.abs(np.mean(road_verts)) < 0.2
     assert np.max(road_verts) < 0.8  # No 12m tree spikes pulling the road upward!
 
+
+def test_multilayer_terrain_distinguishes_road_trees_houses_and_poles(tmp_path: Path):
+    """Test that the multi-layer terrain reconstructor preserves road flatness,
+
+    building elevation, tree canopy volume, and pole heights distinctly.
+    """
+    rng = np.random.default_rng(99)
+
+    # 1. Road (y in [-2, 2], neutral grey color, z near 0.0)
+    rx = rng.uniform(-20, 20, 500)
+    ry = rng.uniform(-2, 2, 500)
+    rz = rng.normal(0.0, 0.02, 500)
+    road_pts = np.column_stack([rx, ry, rz])
+    road_cols = np.full((len(road_pts), 3), [60, 60, 60], dtype=np.uint8)
+
+    # 2. House / Building roof (x in [5, 15], y in [5, 15], z near 8.0, reddish color)
+    hx = rng.uniform(5, 15, 600)
+    hy = rng.uniform(5, 15, 600)
+    hz = rng.normal(8.0, 0.05, 600)
+    house_pts = np.column_stack([hx, hy, hz])
+    house_cols = np.full((len(house_pts), 3), [180, 50, 40], dtype=np.uint8)
+
+    # 3. Tree canopy (x in [-15, -5], y in [5, 15], z in [2, 10], green color)
+    tx = rng.uniform(-15, -5, 600)
+    ty = rng.uniform(5, 15, 600)
+    tz = rng.uniform(2.0, 10.0, 600)
+    tree_pts = np.column_stack([tx, ty, tz])
+    tree_cols = np.full((len(tree_pts), 3), [30, 160, 40], dtype=np.uint8)
+
+    # 4. Vertical Pole (narrow footprint at (0, 8), z from 0 to 6)
+    px = rng.normal(0.0, 0.05, 50)
+    py = rng.normal(8.0, 0.05, 50)
+    pz = rng.uniform(0.0, 6.0, 50)
+    pole_pts = np.column_stack([px, py, pz])
+    pole_cols = np.full((len(pole_pts), 3), [150, 150, 160], dtype=np.uint8)
+
+    # 5. Surrounding ground
+    gx = rng.uniform(-20, 20, 1000)
+    gy = rng.uniform(-20, 20, 1000)
+    gz = rng.normal(0.0, 0.03, 1000)
+    ground_pts = np.column_stack([gx, gy, gz])
+    ground_cols = np.full((len(ground_pts), 3), [120, 100, 70], dtype=np.uint8)
+
+    all_pts = np.vstack([road_pts, house_pts, tree_pts, pole_pts, ground_pts])
+    all_cols = np.vstack([road_cols, house_cols, tree_cols, pole_cols, ground_cols])
+
+    out_obj = tmp_path / "multilayer_test.obj"
+    metrics = reconstruct_terrain_mesh(
+        points=all_pts,
+        colors=all_cols,
+        output_obj=out_obj,
+        grid_dim=60,
+        max_grid_dim=70,
+        up_hint=np.array([0.0, 0.0, 1.0]),
+        is_georef=True,
+    )
+
+    mesh = trimesh.load(str(out_obj), process=False)
+    verts = mesh.vertices
+
+    # Verify road points stay flat and level
+    road_v = verts[(np.abs(verts[:, 0]) <= 15) & (np.abs(verts[:, 1]) <= 1.5), 2]
+    assert len(road_v) > 0
+    assert np.abs(np.mean(road_v)) < 0.25
+
+    # Verify house roof height is maintained (~8.0m)
+    house_v = verts[(verts[:, 0] >= 6) & (verts[:, 0] <= 14) & (verts[:, 1] >= 6) & (verts[:, 1] <= 14), 2]
+    assert len(house_v) > 0
+    assert np.mean(house_v) > 6.5
+
+    # Verify tree canopy retains 3D vertical volume rather than being flattened to bare ground
+    tree_v = verts[(verts[:, 0] >= -14) & (verts[:, 0] <= -6) & (verts[:, 1] >= 6) & (verts[:, 1] <= 14), 2]
+    assert len(tree_v) > 0
+    assert np.max(tree_v) > 5.0
+

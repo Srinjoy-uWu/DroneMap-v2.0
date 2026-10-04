@@ -132,21 +132,128 @@ if (!canvas) {
 
   const gltfLoader = new GLTFLoader();
 
+  // Feature Distinction Attribute Generator:
+  // Computes per-vertex semantic classification and Turbo elevation colors
+  function computeDistinctionAttributes(child) {
+    const geom = child.geometry;
+    if (!geom || !geom.attributes.position) return;
+    const pos = geom.attributes.position;
+    const count = pos.count;
+
+    if (!geom.attributes.normal) {
+      geom.computeVertexNormals();
+    }
+    const norm = geom.attributes.normal;
+
+    geom.computeBoundingBox();
+    const box = geom.boundingBox;
+    const minY = box.min.y;
+    const maxY = box.max.y;
+    const spanY = Math.max(maxY - minY, 0.001);
+    const spanX = Math.max(box.max.x - box.min.x, 0.001);
+    const spanZ = Math.max(box.max.z - box.min.z, 0.001);
+
+    const heightColors = new Float32Array(count * 3);
+    const semanticColors = new Float32Array(count * 3);
+
+    // High-resolution Turbo colormap polynomial approximation
+    function turboRGB(t) {
+      t = Math.max(0, Math.min(1, t));
+      const r = 0.1357 + t * (4.61539 - t * (42.6603 - t * (132.131 - t * (152.55 - t * 59.2863))));
+      const g = 0.0914 + t * (2.19418 + t * (4.84296 - t * (14.1850 + t * (4.27726 - t * 2.82956))));
+      const b = 0.1067 + t * (12.5833 - t * (60.1974 - t * (109.074 - t * (88.5085 - t * 26.8183))));
+      return [Math.max(0, Math.min(1, r)), Math.max(0, Math.min(1, g)), Math.max(0, Math.min(1, b))];
+    }
+
+    // Coarse 2D grid to extract the local bare-ground envelope for relative height
+    const gridRes = 32;
+    const groundGrid = new Float32Array(gridRes * gridRes).fill(Infinity);
+    for (let i = 0; i < count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const gx = Math.max(0, Math.min(gridRes - 1, Math.floor(((x - box.min.x) / spanX) * gridRes)));
+      const gz = Math.max(0, Math.min(gridRes - 1, Math.floor(((z - box.min.z) / spanZ) * gridRes)));
+      const gIdx = gz * gridRes + gx;
+      if (y < groundGrid[gIdx]) groundGrid[gIdx] = y;
+    }
+
+    for (let i = 0; i < count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const nx = norm.getX(i);
+      const ny = norm.getY(i);
+      const nz = norm.getZ(i);
+
+      // 1. Height map colors (absolute normalized elevation)
+      const normY = (y - minY) / spanY;
+      const [hr, hg, hb] = turboRGB(normY);
+      heightColors[i * 3] = hr;
+      heightColors[i * 3 + 1] = hg;
+      heightColors[i * 3 + 2] = hb;
+
+      // 2. Semantic feature distinction (relative height above local ground)
+      const gx = Math.max(0, Math.min(gridRes - 1, Math.floor(((x - box.min.x) / spanX) * gridRes)));
+      const gz = Math.max(0, Math.min(gridRes - 1, Math.floor(((z - box.min.z) / spanZ) * gridRes)));
+      const localBase = groundGrid[gz * gridRes + gx];
+      const relHeight = y - (isFinite(localBase) ? localBase : minY);
+
+      const isVertical = Math.abs(ny) < 0.60;
+      const isHorizontal = ny > 0.75;
+
+      let sr, sg, sb;
+      if (relHeight < 0.8 && isHorizontal) {
+        // Road / Asphalt: Dark Slate Charcoal (#334155)
+        sr = 0.22; sg = 0.26; sb = 0.33;
+      } else if (relHeight > 2.8 && (isVertical || (isHorizontal && relHeight > 3.8))) {
+        // Houses / Buildings / Roofs: Terracotta Red (#e11d48)
+        sr = 0.88; sg = 0.12; sb = 0.28;
+      } else if (relHeight > 1.2 && isVertical && (Math.abs(nx) > 0.65 || Math.abs(nz) > 0.65) && relHeight < 4.0) {
+        // Poles / Lampposts / Vertical Structures: Electric Cyan (#06b6d4)
+        sr = 0.02; sg = 0.71; sb = 0.83;
+      } else if (relHeight >= 0.8) {
+        // Trees / Vegetation Canopy: Forest Emerald Green (#16a34a)
+        sr = 0.09; sg = 0.64; sb = 0.29;
+      } else {
+        // Terrain / Ground / Bare Earth: Warm Golden Tan (#d97706)
+        sr = 0.85; sg = 0.47; sb = 0.02;
+      }
+
+      semanticColors[i * 3] = sr;
+      semanticColors[i * 3 + 1] = sg;
+      semanticColors[i * 3 + 2] = sb;
+    }
+
+    geom.userData.heightColorAttr = new THREE.BufferAttribute(heightColors, 3);
+    geom.userData.semanticColorAttr = new THREE.BufferAttribute(semanticColors, 3);
+    geom.userData.originalColorAttr = geom.attributes.color ? geom.attributes.color.clone() : null;
+  }
+
   // Shading Controller
   function applyShadingMode(mode) {
     activeShadingMode = mode;
     const btnTex = document.getElementById('btn-shade-textured');
+    const btnSem = document.getElementById('btn-shade-semantic');
+    const btnHgt = document.getElementById('btn-shade-height');
     const btnWhite = document.getElementById('btn-shade-white');
+    const legSem = document.getElementById('semantic-legend');
+    const legHgt = document.getElementById('height-legend');
+
     if (btnTex) btnTex.classList.toggle('active', mode === 'textured');
+    if (btnSem) btnSem.classList.toggle('active', mode === 'semantic');
+    if (btnHgt) btnHgt.classList.toggle('active', mode === 'height');
     if (btnWhite) btnWhite.classList.toggle('active', mode === 'white');
+
+    if (legSem) legSem.style.display = mode === 'semantic' ? 'block' : 'none';
+    if (legHgt) legHgt.style.display = mode === 'height' ? 'block' : 'none';
 
     if (!currentModel) return;
 
     currentModel.traverse((child) => {
-      // Only mesh nodes have a .material. Group, Object3D, Bone, etc. do not.
-      // Accessing .material on them throws TypeError and aborts the traverse,
-      // leaving the mesh with no shading applied (renders black).
+      // Only mesh nodes have a .material.
       if (!child.isMesh || !child.material) return;
+      const geom = child.geometry;
 
       if (mode === 'white') {
         child.material.map = null;
@@ -154,18 +261,39 @@ if (!canvas) {
         child.material.color.setHex(0xe2e8f0);
         child.material.roughness = 0.55;
         child.material.metalness = 0.04;
+      } else if (mode === 'semantic') {
+        child.material.map = null;
+        if (geom && geom.userData.semanticColorAttr) {
+          geom.setAttribute('color', geom.userData.semanticColorAttr);
+          child.material.vertexColors = true;
+          child.material.color.setHex(0xffffff);
+        }
+        child.material.roughness = 0.65;
+        child.material.metalness = 0.0;
+      } else if (mode === 'height') {
+        child.material.map = null;
+        if (geom && geom.userData.heightColorAttr) {
+          geom.setAttribute('color', geom.userData.heightColorAttr);
+          child.material.vertexColors = true;
+          child.material.color.setHex(0xffffff);
+        }
+        child.material.roughness = 0.65;
+        child.material.metalness = 0.0;
       } else if (mode === 'textured') {
         if (child.userData.originalMap) {
           child.material.map = child.userData.originalMap;
         }
-        if (child.userData.hasVertexColors) {
+        if (geom && geom.userData.originalColorAttr) {
+          geom.setAttribute('color', geom.userData.originalColorAttr);
           child.material.vertexColors = true;
+        } else {
+          child.material.vertexColors = child.userData.hasVertexColors || false;
         }
         if (child.userData.originalColor) {
           child.material.color.copy(child.userData.originalColor);
         }
-        child.material.roughness = 0.9;
-        child.material.metalness = 0.0;
+        child.material.roughness = 0.75;
+        child.material.metalness = 0.05;
       }
       child.material.needsUpdate = true;
     });
@@ -427,13 +555,35 @@ if (!canvas) {
   const chkAutorotate = document.getElementById('chk-autorotate');
 
   const btnShadeTextured = document.getElementById('btn-shade-textured');
+  const btnShadeSemantic = document.getElementById('btn-shade-semantic');
+  const btnShadeHeight = document.getElementById('btn-shade-height');
   const btnShadeWhite = document.getElementById('btn-shade-white');
+  const btnCloseSemanticLeg = document.getElementById('btn-close-semantic-legend');
+  const btnCloseHeightLeg = document.getElementById('btn-close-height-legend');
 
   if (btnShadeTextured) {
     btnShadeTextured.addEventListener('click', () => applyShadingMode('textured'));
   }
+  if (btnShadeSemantic) {
+    btnShadeSemantic.addEventListener('click', () => applyShadingMode('semantic'));
+  }
+  if (btnShadeHeight) {
+    btnShadeHeight.addEventListener('click', () => applyShadingMode('height'));
+  }
   if (btnShadeWhite) {
     btnShadeWhite.addEventListener('click', () => applyShadingMode('white'));
+  }
+  if (btnCloseSemanticLeg) {
+    btnCloseSemanticLeg.addEventListener('click', () => {
+      const leg = document.getElementById('semantic-legend');
+      if (leg) leg.style.display = 'none';
+    });
+  }
+  if (btnCloseHeightLeg) {
+    btnCloseHeightLeg.addEventListener('click', () => {
+      const leg = document.getElementById('height-legend');
+      if (leg) leg.style.display = 'none';
+    });
   }
 
   const btnVariantPrimary = document.getElementById('btn-variant-primary');

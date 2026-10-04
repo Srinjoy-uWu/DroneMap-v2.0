@@ -344,27 +344,48 @@ def reconstruct_terrain_mesh(
         idxs = idxs[:, None]
 
     local_z = pts_rot[idxs, 2]
+    local_cols = colors[idxs].astype(np.float32)
 
     # Surface height estimation:
     # 1. Base ground and road datum:
-    # Ground/road returns always occupy the lower envelope of point returns.
-    # The 20th percentile captures the smooth, continuous road and ground surface without tree interference.
-    z_ground = np.percentile(local_z, 20, axis=1)
+    # Ground/road returns occupy the lower envelope of point returns.
+    # The 15th percentile captures the smooth, continuous bare earth ground datum.
+    z_ground = np.percentile(local_z, 15, axis=1)
 
-    # 2. Elevated structure detection:
-    # Identify cells that represent genuine planar buildings or structures (e.g. flat/sloped roofs)
-    # vs scattered tree foliage or isolated spikes.
+    # 2. Road surface detection & planar leveling:
+    # Roads have neutral asphalt reflectance (low saturation, low ExG) and lie directly on ground datum
+    r_ch, g_ch, b_ch = local_cols[:, :, 0], local_cols[:, :, 1], local_cols[:, :, 2]
+    sat_pts = np.max(local_cols, axis=2) - np.min(local_cols, axis=2)
+    exg_pts = 2.0 * g_ch - r_ch - b_ch
+    is_road_pt = (sat_pts < 35.0) & (exg_pts < 4.0) & (np.abs(local_z - z_ground[:, None]) < 0.35)
+    road_pt_count = np.sum(is_road_pt, axis=1)
+    is_road = road_pt_count >= 4
+    sum_road_z = np.sum(np.where(is_road_pt, local_z, 0.0), axis=1)
+    z_road = np.where(is_road, sum_road_z / np.maximum(road_pt_count, 1), z_ground)
+
+    # 3. Elevated structure detection (houses, roofs, buildings):
     mask_elev = local_z > (z_ground[:, None] + 1.2)
     count_elev = np.sum(mask_elev, axis=1)
-
     sum_elev = np.sum(np.where(mask_elev, local_z, 0.0), axis=1)
     mean_elev = sum_elev / np.maximum(count_elev, 1)
     sq_diff_elev = np.sum(np.where(mask_elev, (local_z - mean_elev[:, None]) ** 2, 0.0), axis=1)
     std_elev = np.sqrt(sq_diff_elev / np.maximum(count_elev, 1))
 
-    # Coherent structures have multiple points agreeing tightly on elevation (std <= 0.65m)
-    # Trees have wide vertical scatter (leaves across meters, std > 1.0m) and are de-spiked.
-    is_structure = (count_elev >= 3) & (std_elev <= 0.65)
+    # Coherent structures have multiple elevated points agreeing on roof height
+    is_structure = (count_elev >= 3) & (std_elev <= 0.85)
+
+    # 4. Vegetation & Tree Canopy preservation:
+    # Foliage points have positive ExG or green hue, and stand 0.8m to 20m above ground
+    is_veg_pt = ((exg_pts > 7.0) | ((g_ch > r_ch) & (g_ch > b_ch))) & (local_z > z_ground[:, None] + 0.8)
+    veg_pt_count = np.sum(is_veg_pt, axis=1)
+    is_vegetation = (veg_pt_count >= 3) & (~is_structure)
+    # Tree canopy elevation captures upper canopy foliage (85th percentile), giving trees distinct volume
+    z_veg = np.percentile(local_z, 85, axis=1)
+
+    # 5. Poles & narrow vertical obstacles:
+    z_range = np.max(local_z, axis=1) - np.min(local_z, axis=1)
+    is_pole = (z_range > 2.0) & (count_elev <= 3) & (~is_vegetation)
+    z_pole = np.max(local_z, axis=1)
 
     if labels is not None and len(labels) == len(points):
         # CLASS_STRUCTURE = 4, CLASS_VEGETATION = 3, CLASS_TERRAIN = 2
@@ -372,18 +393,33 @@ def reconstruct_terrain_mesh(
         struct_pts_count = np.sum(local_labels == 4, axis=1)
         veg_pts_count = np.sum(local_labels == 3, axis=1)
         is_structure = is_structure | ((struct_pts_count >= 3) & (struct_pts_count > veg_pts_count) & (count_elev >= 2))
-        is_structure = is_structure & ~((veg_pts_count >= 4) & (struct_pts_count == 0))
+        is_structure = is_structure & ~((veg_pts_count >= 5) & (struct_pts_count == 0))
+        is_vegetation = is_vegetation | ((veg_pts_count >= 3) & (veg_pts_count >= struct_pts_count))
 
-    gz = np.where(is_structure, mean_elev, z_ground)
+    # Synthesize multi-layer distinctive surface elevation:
+    # Structures keep roof height, trees keep 3D canopy volume, poles keep vertical peaks, roads are level
+    gz = np.where(
+        is_structure,
+        mean_elev,
+        np.where(
+            is_vegetation,
+            z_veg,
+            np.where(
+                is_pole,
+                z_pole,
+                np.where(is_road, z_road, z_ground),
+            ),
+        ),
+    )
 
     # 4. Edge-preserving 3D Bilateral Filtering
     Z_grid = gz.reshape((ny, nx)).astype(np.float32)
     Valid_grid = filled_valid
     try:
-        # Sharp edge-preserving threshold: 0.65m prevents smoothing across vertical building walls (>= 1m)
+        # Sharp edge-preserving threshold: 0.50m prevents smoothing across vertical building walls & tree steps (>= 1m)
         # while planarizing flat roofs and silky smooth roads.
         Z_bilat = cv2.bilateralFilter(
-            Z_grid, d=5, sigmaColor=0.65, sigmaSpace=1.5
+            Z_grid, d=5, sigmaColor=0.50, sigmaSpace=1.5
         )
         Z_smooth = np.where(Valid_grid, Z_bilat, Z_grid).astype(np.float64)
     except Exception:
@@ -488,6 +524,15 @@ def reconstruct_terrain_mesh(
         if np.any(unpop):
             _, (ny_map, nx_map) = scipy.ndimage.distance_transform_edt(unpop, return_indices=True)
             tex_img = tex_img[ny_map, nx_map]
+
+        # Enhance photogrammetric detail & micro-contrast for sharp roads, pavement markings, and roofs
+        try:
+            lab = cv2.cvtColor(tex_img, cv2.COLOR_RGB2LAB)
+            clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            tex_img = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        except Exception:
+            pass
     else:
         tex_img = np.full((tex_res, tex_res, 3), 180, dtype=np.uint8)
 
