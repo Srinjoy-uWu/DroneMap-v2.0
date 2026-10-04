@@ -364,6 +364,7 @@ def _run_terrain_mesh(
         up_hint=up_hint,
         max_tilt_deg=cfg.terrain_max_tilt_deg if is_georef else max(cfg.terrain_max_tilt_deg, 60.0),
         texture_size=cfg.texture_size,
+        is_georef=is_georef,
     )
     if metrics["ground_plane_source"] == "fit_rejected":
         ctx.note(
@@ -419,13 +420,25 @@ def _run_terrain_mesh(
         "ground_normal": metrics.get("ground_normal"),
         "textured_obj_2_5d": str(out_obj),
     }
-    cand_3d = ws.mesh_dir / "scene_dense_mesh_texture.obj"
-    if not cand_3d.exists():
-        cand_3d = ws.mesh_dir / "scene_dense_mesh_refine_texture.obj"
-    if cand_3d.exists():
+    cand_3d = None
+    for cand in [
+        ws.mesh_dir / "scene_dense_mesh_clean_texture.obj",
+        ws.mesh_dir / "scene_dense_mesh_texture.obj",
+        ws.mesh_dir / "scene_dense_mesh_refine_texture.obj",
+    ]:
+        if cand.exists():
+            cand_3d = cand
+            break
+
+    if cand_3d is not None and cand_3d.exists():
         outputs["textured_obj_3d"] = str(cand_3d)
-        outputs["textured_obj_alt"] = str(cand_3d)
-        outputs["textured_obj_alt_label"] = "openmvs_3d"
+        if cfg.mode != "terrain_2.5d":
+            outputs["textured_obj"] = str(cand_3d)
+            outputs["textured_obj_alt"] = str(out_obj)
+            outputs["textured_obj_alt_label"] = "terrain_2.5d"
+        else:
+            outputs["textured_obj_alt"] = str(cand_3d)
+            outputs["textured_obj_alt_label"] = "openmvs_3d"
     ctx.output(**outputs)
 
 
@@ -449,9 +462,11 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     # Automatic routing from capture quality verdict
     pose_verdict = ws.stage("pose").metrics.get("capture_verdict")
     if cfg.mode == "auto" and config.quality.route_terrain_to_2_5d and pose_verdict == "terrain_2_5d":
-        ctx.note("routing to 2.5D terrain mesh based on capture quality verdict (terrain_2_5d)")
+        ctx.note("routing to 2.5D terrain mesh based on capture quality verdict (terrain_2_5d); generating both 2.5D and 3D models")
         _run_terrain_mesh(ws, cfg, dense_ply, ctx)
-        return
+        dense_mvs = ws.dense_dir / "scene_dense.mvs"
+        if not dense_mvs.exists():
+            return
 
     # Condition and semantically classify the 3D dense cloud (stripping Sky & distant horizon,
     # and detecting oblique sightline elevation ramps where Castle/Terrain/Water were flattened)
@@ -541,13 +556,13 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                 "ReconstructMesh",
                 [
                     str(dense_mvs),
-                    "--working-folder", str(ws.mesh_dir),
+                    "--working-folder", str(ws.dense_dir),
                     "-p", str(ply_for_openmvs),
                     "-o", str(raw_mesh_mvs),
                     "--min-point-distance", str(cfg.min_point_distance),
                     "--decimate", str(cfg.decimate),
                 ],
-                cwd=ws.mesh_dir,
+                cwd=ws.dense_dir,
                 log_path=ws.log_path("openmvs_reconstruct"),
             )
         except Exception as exc:
@@ -563,11 +578,11 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                     "ReconstructMesh",
                     [
                         str(dense_mvs),
-                        "--working-folder", str(ws.mesh_dir),
+                        "--working-folder", str(ws.dense_dir),
                         "-o", str(raw_mesh_mvs),
                         "--decimate", str(cfg.decimate),
                     ],
-                    cwd=ws.mesh_dir,
+                    cwd=ws.dense_dir,
                     log_path=ws.log_path("openmvs_reconstruct"),
                 )
             except Exception as inner_exc:

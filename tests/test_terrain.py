@@ -343,3 +343,65 @@ def test_terrain_texture_high_res(tmp_path: Path):
     with Image.open(png_files[0]) as img:
         assert img.size == (1024, 1024)
 
+
+def test_georef_vertical_prior_strict_leveling():
+    """Georeferenced vertical datum must not be tilted by arbitrary point cloud PCA."""
+    rng = np.random.default_rng(42)
+    # Natural terrain sloping by 3 degrees
+    x = rng.uniform(-50, 50, 500)
+    y = rng.uniform(-50, 50, 500)
+    z = 0.05 * x + rng.normal(0, 0.02, 500)
+    pts = np.column_stack([x, y, z])
+
+    up_datum = np.array([0.0, 0.0, 1.0])
+    plane_datum = fit_ground_plane(pts, up_hint=up_datum, force_prior=True)
+    assert plane_datum.tilt_deg == 0.0
+    assert plane_datum.source == "datum_vertical"
+    assert np.allclose(plane_datum.normal, up_datum)
+
+
+def test_terrain_preserves_elevated_structure_leveling(tmp_path: Path):
+    """Building rooftops must stay level at their true height without being smoothed away into the ground."""
+    rng = np.random.default_rng(77)
+    # Ground plane Z = 0
+    gx = rng.uniform(-20, 20, 600)
+    gy = rng.uniform(-20, 20, 600)
+    gz = rng.normal(0.0, 0.02, 600)
+    ground = np.column_stack([gx, gy, gz])
+
+    # Flat building roof at Z = 8.0 m
+    rx = rng.uniform(-5, 5, 200)
+    ry = rng.uniform(-5, 5, 200)
+    rz = 8.0 + rng.normal(0.0, 0.02, 200)
+    roof = np.column_stack([rx, ry, rz])
+
+    pts = np.vstack([ground, roof])
+    cols = np.full((len(pts), 3), 160, dtype=np.uint8)
+
+    out_obj = tmp_path / "structure_level.obj"
+    metrics = reconstruct_terrain_mesh(
+        points=pts,
+        colors=cols,
+        output_obj=out_obj,
+        grid_dim=50,
+        max_grid_dim=60,
+        up_hint=np.array([0.0, 0.0, 1.0]),
+        is_georef=True,
+    )
+
+    mesh = trimesh.load(str(out_obj), process=False)
+    verts = mesh.vertices
+
+    # Vertices inside the roof footprint (-4 <= x, y <= 4)
+    roof_mask = (np.abs(verts[:, 0]) <= 3.5) & (np.abs(verts[:, 1]) <= 3.5)
+    assert np.any(roof_mask)
+    roof_heights = verts[roof_mask, 2]
+    # The roof height must be preserved near 8.0 m, NOT smoothed down to 2 or 3 m
+    assert np.median(roof_heights) > 7.0
+
+    # Ground vertices far from the building (|x| >= 10) must stay near 0.0 m
+    ground_mask = (np.abs(verts[:, 0]) >= 10.0)
+    assert np.any(ground_mask)
+    ground_heights = verts[ground_mask, 2]
+    assert np.abs(np.median(ground_heights)) < 0.3
+

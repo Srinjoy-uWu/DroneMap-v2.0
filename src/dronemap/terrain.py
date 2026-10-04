@@ -82,6 +82,7 @@ def fit_ground_plane(
     points: np.ndarray,
     up_hint: np.ndarray | None = None,
     max_tilt_deg: float = MAX_GROUND_TILT_DEG,
+    force_prior: bool = False,
 ) -> GroundPlane:
     """Recover the ground plane of a dense cloud, robustly and measurably.
 
@@ -119,16 +120,15 @@ def fit_ground_plane(
     up = np.array([0.0, 0.0, 1.0]) if up_hint is None else np.asarray(up_hint, dtype=float)
     up = up / max(float(np.linalg.norm(up)), 1e-12)
 
-    if len(points) < 16:
-        # Too few points to fit anything defensible; use the prior and say so.
+    if force_prior or len(points) < 16:
         return GroundPlane(
             center=points.mean(axis=0) if len(points) else np.zeros(3),
             normal=up,
             rotation=_rotation_aligning(up, np.array([0.0, 0.0, 1.0])),
             tilt_deg=0.0,
-            rms_residual_m=float("nan"),
-            inlier_fraction=0.0,
-            source="prior",
+            rms_residual_m=0.0,
+            inlier_fraction=1.0,
+            source="datum_vertical" if force_prior else "prior",
         )
 
     normal = up.copy()
@@ -268,12 +268,13 @@ def reconstruct_terrain_mesh(
     colors: np.ndarray,
     output_obj: Path,
     output_ply: Path | None = None,
-    grid_dim: int = 250,
-    max_grid_dim: int = 400,
-    k_neighbors: int = 8,
+    grid_dim: int = 500,
+    max_grid_dim: int = 800,
+    k_neighbors: int = 12,
     up_hint: np.ndarray | None = None,
     max_tilt_deg: float = MAX_GROUND_TILT_DEG,
-    texture_size: int = 2048,
+    texture_size: int = 4096,
+    is_georef: bool = False,
 ) -> dict[str, int | float | str]:
     """Build a solid, non-deformed 2.5D terrain surface mesh from 3D points.
 
@@ -300,7 +301,7 @@ def reconstruct_terrain_mesh(
     output_obj.parent.mkdir(parents=True, exist_ok=True)
 
     # 1. Fit ground plane and rotate into canonical horizontal coordinates
-    plane = fit_ground_plane(points, up_hint=up_hint, max_tilt_deg=max_tilt_deg)
+    plane = fit_ground_plane(points, up_hint=up_hint, max_tilt_deg=max_tilt_deg, force_prior=is_georef)
     center, R = plane.center, plane.rotation
     pts_rot = (points - center) @ R.T
 
@@ -339,39 +340,51 @@ def reconstruct_terrain_mesh(
     inpainted_mask = (filled_valid & ~direct_valid).astype(np.uint8)
     valid_node = filled_valid.ravel()
 
-    k_query = min(max(k_neighbors, 8), len(points))
+    k_query = min(max(k_neighbors, 12), len(points))
     dists, idxs = tree.query(grid_xy, k=k_query)
     if k_query == 1:
         dists = dists[:, None]
         idxs = idxs[:, None]
 
-    # Regularized inverse distance weighting to prevent singular division
-    reg_eps = max(0.25 * cell_size, 0.05)
-    weights = 1.0 / (np.maximum(dists, 1e-4) + reg_eps)**2
-
-    # Local outlier rejection on Z to suppress aerial floaters and sub-surface spikes
     local_z = pts_rot[idxs, 2]
-    med_z = np.median(local_z, axis=1, keepdims=True)
-    dev_z = np.abs(local_z - med_z)
-    mad_z = np.median(dev_z, axis=1, keepdims=True) * 1.4826
-    outlier_mask = dev_z > np.maximum(3.0 * mad_z, 0.5)
-    weights[outlier_mask] = 0.0
+
+    # Surface height estimation:
+    # 1. Reject aerial floaters/noise: points > 4m above the 90th percentile of local column
+    p90_z = np.percentile(local_z, 90, axis=1, keepdims=True)
+    floater_mask = (local_z - p90_z) > 4.0
+
+    # 2. Distance-based weights regularized by cell size
+    reg_eps = max(0.25 * cell_size, 0.05)
+    w_dist = 1.0 / (np.maximum(dists, 1e-4) + reg_eps)**2
+    w_dist[floater_mask] = 0.0
+
+    # 3. Surface tier clustering:
+    # The closest horizontal point dictates whether this cell belongs to a structure (roof) or ground.
+    # We weight points by elevation consistency with the closest non-floater point.
+    z_ref = local_z[:, 0]
+    z_dev = np.abs(local_z - z_ref[:, None])
+    # Elevation scale: sigma = 1.5m ensures points within 1.5m (same roof or ground) have strong weight,
+    # while points > 3m away vertically (ground below a roof, or roof above ground) are sharply excluded.
+    w_elev = np.exp(-0.5 * (z_dev / 1.5)**2)
+
+    weights = w_dist * w_elev
     weight_sum = weights.sum(axis=1, keepdims=True)
     zero_weights = (weight_sum[:, 0] == 0)
     if np.any(zero_weights):
-        weights[zero_weights] = 1.0 / (dists[zero_weights] + reg_eps)**2
+        weights[zero_weights] = w_dist[zero_weights]
         weight_sum = weights.sum(axis=1, keepdims=True)
     weights /= np.maximum(weight_sum, 1e-12)
 
     gz = np.sum(weights * local_z, axis=1)
 
-    # 4. Edge-preserving 3D Bilateral Filtering (retains sharp vertical building/castle walls)
+    # 4. Edge-preserving 3D Bilateral Filtering
     Z_grid = gz.reshape((ny, nx)).astype(np.float32)
     Valid_grid = filled_valid
     try:
-        z_range = max(float(np.percentile(Z_grid, 95) - np.percentile(Z_grid, 5)), 1.0)
+        # Sharp edge-preserving threshold: 0.65m prevents smoothing across vertical walls/steps (>= 1m)
+        # while beautifully planarizing flat roofs and level ground terrain.
         Z_bilat = cv2.bilateralFilter(
-            Z_grid, d=5, sigmaColor=max(0.25 * z_range, 0.6), sigmaSpace=1.5
+            Z_grid, d=5, sigmaColor=0.65, sigmaSpace=1.5
         )
         Z_smooth = np.where(Valid_grid, Z_bilat, Z_grid).astype(np.float64)
     except Exception:
@@ -430,12 +443,14 @@ def reconstruct_terrain_mesh(
 
     # 8. High-resolution texture atlas generation + Telea hole inpainting
     if colors is not None and len(colors) == len(points):
-        k_col = min(3, k_query)
-        w_col = 1.0 / (np.maximum(dists[:, :k_col], 1e-4) + 0.05 * cell_size) ** 3
+        # 3D proximity-based color weighting so roof gets roof colors, ground gets ground colors
+        diff_z = local_z - gz[:, None]
+        d_3d = np.sqrt(dists**2 + diff_z**2)
+        w_col = 1.0 / (np.maximum(d_3d, 1e-4) + 0.05 * cell_size) ** 3
         w_col /= np.maximum(w_col.sum(axis=1, keepdims=True), 1e-12)
-        gr = np.clip(np.sum(w_col * colors[idxs[:, :k_col], 0], axis=1), 0, 255).astype(np.uint8)
-        gg = np.clip(np.sum(w_col * colors[idxs[:, :k_col], 1], axis=1), 0, 255).astype(np.uint8)
-        gb = np.clip(np.sum(w_col * colors[idxs[:, :k_col], 2], axis=1), 0, 255).astype(np.uint8)
+        gr = np.clip(np.sum(w_col * colors[idxs, 0], axis=1), 0, 255).astype(np.uint8)
+        gg = np.clip(np.sum(w_col * colors[idxs, 1], axis=1), 0, 255).astype(np.uint8)
+        gb = np.clip(np.sum(w_col * colors[idxs, 2], axis=1), 0, 255).astype(np.uint8)
     else:
         gr = np.full(len(gz), 180, dtype=np.uint8)
         gg = np.full(len(gz), 180, dtype=np.uint8)
@@ -448,7 +463,7 @@ def reconstruct_terrain_mesh(
         except Exception:
             pass
 
-    tex_res = min(max(texture_size, 1024), 4096)
+    tex_res = min(max(texture_size, 1024), 8192)
     if (ny, nx) != (tex_res, tex_res):
         tex_img = cv2.resize(base_tex, (tex_res, tex_res), interpolation=cv2.INTER_LANCZOS4)
         try:

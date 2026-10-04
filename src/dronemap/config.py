@@ -244,8 +244,8 @@ class MeshConfig(BaseModel):
     min_component_faces: int = 200
     max_components: int = 12
     # 2.5D Terrain surface mesh settings
-    terrain_grid_dim: int = 250
-    terrain_grid_max: int = 400
+    terrain_grid_dim: int = 500
+    terrain_grid_max: int = 800
     # Reject a ground-plane fit tilted further than this from the known
     # vertical. Measured on this repository's runs, the unconstrained PCA fit
     # returned 60-85 deg on five of six real scenes, which put the 2.5D product
