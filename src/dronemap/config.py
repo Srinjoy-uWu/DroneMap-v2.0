@@ -220,7 +220,7 @@ class MeshConfig(BaseModel):
     """Stage 6 - Mesh reconstruction, refinement and texturing."""
 
     mode: Literal["auto", "openmvs", "terrain_2.5d"] = "auto"
-    refine: bool = True
+    refine: bool = False
     min_point_distance: float = 1.0
     decimate: float = 1.0
     texture_size: int = 8192

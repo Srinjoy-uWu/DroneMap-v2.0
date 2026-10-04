@@ -41,11 +41,16 @@ _ALT_ALIASES = {
     "altitude", "alt", "gps.alt", "altitude(m)", "alt(m)", "abs_alt",
     "altitudemsl", "altitude_m", "gps.alt(m)",
     "osd.altitude", "osd.alt(m)",
+    "altitude_above_sealevel(feet)", "altitudesealevel(feet)",
+    "altitude_above_sealevel", "altitude(feet)", "max_altitude(feet)",
 }
 _RELALT_ALIASES = {
     "rel_alt", "relativealtitude", "relative_alt", "relalt", "height",
     "heightabovehomepoint(m)",
     "osd.height[d]", "osd.height",
+    "height_above_takeoff(feet)", "heightabovetakeoff(feet)",
+    "height_above_ground_at_drone_location(feet)",
+    "height_sonar(feet)", "height(feet)",
 }
 _TIME_ALIASES = {
     "time", "timestamp", "time(s)", "osd.flytime(s)", "offset_time",
@@ -58,14 +63,21 @@ _TIME_ALIASES = {
     "timestamp_s", "time_s", "t", "t_s", "seconds", "sec", "secs",
     "elapsed_s", "elapsed_time", "elapsed(s)", "flight_time", "flighttime",
     "flight_time_s", "frame_time", "frametime",
+    "time(millisecond)", "timemillisecond", "time_millisecond",
+    "time(ms)", "time_ms",
 }
 _SPEED_ALIASES = {
     "speed", "groundspeed", "ground_speed", "speed(m/s)", "gps.speed",
     "osd.hspeed(m/s)", "horizontalspeed",
+    "speed(mph)", "speedmph", "max_speed(mph)",
 }
 _PITCH_ALIASES = {
     "gimbal_pitch", "gimbal.pitch", "osd.gimbal_pitch",
     "gimbal_pitch(°)", "gimbalpitch",
+    "gimbal_pitch(degrees)", "gimbalpitchdegrees",
+}
+_IS_VIDEO_ALIASES = {
+    "isvideo", "is_video", "video_recording",
 }
 
 
@@ -115,6 +127,7 @@ def parse(path: Path) -> list[dict]:
     time_col = _find_col(header, _TIME_ALIASES)
     spd_col  = _find_col(header, _SPEED_ALIASES)
     pit_col  = _find_col(header, _PITCH_ALIASES)
+    vid_col  = _find_col(header, _IS_VIDEO_ALIASES)
 
     if lat_col is None or lon_col is None:
         raise RuntimeError(
@@ -123,8 +136,36 @@ def parse(path: Path) -> list[dict]:
             "Expected one of: " + ", ".join(sorted(_LAT_ALIASES)) + " (case-insensitive)."
         )
 
+    # Unit multipliers (feet -> m, mph -> m/s)
+    alt_scale = 0.3048 if alt_col and ("feet" in alt_col.lower() or "(ft)" in alt_col.lower()) else 1.0
+    ralt_scale = 0.3048 if ralt_col and ("feet" in ralt_col.lower() or "(ft)" in ralt_col.lower()) else 1.0
+    spd_scale = 0.44704 if spd_col and "mph" in spd_col.lower() else (
+        1.0 / 3.6 if spd_col and any(u in spd_col.lower() for u in ("km/h", "kph")) else 1.0
+    )
+    time_is_ms = bool(time_col and any(u in time_col.lower() for u in ("millisecond", "(ms)", "_ms")))
+
+    rows = list(reader)
+
+    # Video synchronization: if the CSV records a whole flight but marks video recording
+    # via isVideo == 1 (e.g. DJI Airdata logs), synchronize timestamps so t=0 is video start
+    t_video_start: float | None = None
+    has_video_tag = False
+    if vid_col and any(r.get(vid_col, "").strip() == "1" for r in rows):
+        has_video_tag = True
+        # Find raw time of first video record
+        for r in rows:
+            if r.get(vid_col, "").strip() == "1":
+                raw_val = _safe_float(r.get(time_col, "")) if time_col else None
+                if raw_val is not None:
+                    t_video_start = (raw_val / 1000.0) if time_is_ms else raw_val
+                break
+
     fixes: list[dict] = []
-    for row_idx, row in enumerate(reader):
+    for row_idx, row in enumerate(rows):
+        # When isVideo is recorded, filter to fixes during the video capture
+        if has_video_tag and row.get(vid_col, "").strip() != "1":
+            continue
+
         lat = _safe_float(row.get(lat_col, ""))
         lon = _safe_float(row.get(lon_col, ""))
         if lat is None or lon is None:
@@ -140,22 +181,19 @@ def parse(path: Path) -> list[dict]:
         if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
             continue
 
-        # Altitude. Two different consumers need two different numbers, and
-        # collapsing them into one field is how a 200-300 m MSL datum ends up
-        # being treated as flying height:
-        #   alt_m  - the georeferencing datum, absolute where the log has one.
-        #   agl_m  - height above the launch point, used for ground-footprint
-        #            and GSD arithmetic. Only set when the log really reports a
-        #            relative altitude; never inferred from an absolute one.
+        # Altitude
         alt_m: float | None = None
         agl_m: float | None = None
         alt_source: str = "none"
         if alt_col:
-            alt_m = _safe_float(row.get(alt_col, ""))
-            if alt_m is not None:
+            raw_alt = _safe_float(row.get(alt_col, ""))
+            if raw_alt is not None:
+                alt_m = raw_alt * alt_scale
                 alt_source = "absolute"
         if ralt_col:
-            agl_m = _safe_float(row.get(ralt_col, ""))
+            raw_ralt = _safe_float(row.get(ralt_col, ""))
+            if raw_ralt is not None:
+                agl_m = raw_ralt * ralt_scale
         if alt_m is None and agl_m is not None:
             alt_m = agl_m
             alt_source = "relative_home"
@@ -165,7 +203,12 @@ def parse(path: Path) -> list[dict]:
         time_source = "synthetic_10hz"
         if time_col:
             raw_t = row.get(time_col, "").strip()
-            if raw_t.isdigit():
+            if time_is_ms:
+                ms_val = _safe_float(raw_t)
+                if ms_val is not None:
+                    timestamp_s = ms_val / 1000.0
+                    time_source = "column"
+            elif raw_t.isdigit():
                 val = int(raw_t)
                 time_source = "column"
                 if val > 1_000_000_000_000:  # ms epoch (> year 2001 in ms)
@@ -182,7 +225,12 @@ def parse(path: Path) -> list[dict]:
                     timestamp_s = ts
                     time_source = "column"
 
-        speed_mps   = _safe_float(row.get(spd_col, "")) if spd_col else None
+        # Adjust for video recording start offset if detected
+        if t_video_start is not None and time_source == "column":
+            timestamp_s = max(0.0, timestamp_s - t_video_start)
+
+        raw_spd = _safe_float(row.get(spd_col, "")) if spd_col else None
+        speed_mps = (raw_spd * spd_scale) if raw_spd is not None else None
         gimbal_pitch = _safe_float(row.get(pit_col, "")) if pit_col else None
 
         fixes.append({

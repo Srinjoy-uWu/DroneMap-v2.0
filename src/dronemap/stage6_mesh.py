@@ -413,11 +413,20 @@ def _run_terrain_mesh(
         structure_points=struct_pts,
         oblique_elevation_rectified=sem_summary.get("oblique_elevation_rectified", False),
     )
-    ctx.output(
-        textured_obj=str(out_obj),
-        mesh_ply=str(out_ply),
-        ground_normal=metrics.get("ground_normal"),
-    )
+    outputs = {
+        "textured_obj": str(out_obj),
+        "mesh_ply": str(out_ply),
+        "ground_normal": metrics.get("ground_normal"),
+        "textured_obj_2_5d": str(out_obj),
+    }
+    cand_3d = ws.mesh_dir / "scene_dense_mesh_texture.obj"
+    if not cand_3d.exists():
+        cand_3d = ws.mesh_dir / "scene_dense_mesh_refine_texture.obj"
+    if cand_3d.exists():
+        outputs["textured_obj_3d"] = str(cand_3d)
+        outputs["textured_obj_alt"] = str(cand_3d)
+        outputs["textured_obj_alt_label"] = "openmvs_3d"
+    ctx.output(**outputs)
 
 
 def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_StageContext") -> None:
@@ -785,11 +794,27 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         **retexture,
         **cleanup,
     )
+    # Always generate the complementary 2.5D terrain model so the user has BOTH 3D and 2.5D models
+    terrain_obj = ws.mesh_dir / "scene_dense_mesh_terrain_texture.obj"
+    if not terrain_obj.exists():
+        try:
+            ctx.note("Generating complementary 2.5D terrain surface model...")
+            _run_terrain_mesh(ws, cfg, dense_ply, ctx, preloaded_sem=sem_res)
+        except Exception as t_exc:
+            ctx.note(f"2.5D terrain mesh generation note: {t_exc}")
+
     outputs: dict[str, str] = {
         "textured_obj": str(textured_obj),
         "mesh_ply": str(best_ply),
+        "textured_obj_3d": str(textured_obj),
     }
+    if terrain_obj.exists():
+        outputs["textured_obj_2_5d"] = str(terrain_obj)
+
     if alt_obj is not None:
         outputs["textured_obj_alt"] = str(alt_obj)
         outputs["textured_obj_alt_label"] = alt_label or "alternate"
+    elif terrain_obj.exists():
+        outputs["textured_obj_alt"] = str(terrain_obj)
+        outputs["textured_obj_alt_label"] = "terrain_2.5d"
     ctx.output(**outputs)

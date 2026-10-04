@@ -102,11 +102,13 @@ def _run_job_worker(
         # The web UI must not silently weaken the geometry requirements used
         # by the CLI; poor camera geometry should be rejected, not hidden.
         overrides_list: list[str] = []
-        # Optimized presets for fast execution and high quality without stalling
+        # Optimized presets for fast execution and high quality without stalling.
+        # Keyframe counts must be sufficient to maintain >=75% overlap on long flights
+        # (e.g. 4-min 4K drone surveys), otherwise insufficient baseline causes SfM failure.
         if quality == "fast":
             overrides_list.extend([
                 "frames.max_long_edge=1600",
-                "frames.max_keyframes=22",
+                "frames.max_keyframes=120",
                 "pose.max_num_features=8192",
                 "dense.resolution_level=2",
                 "dense.max_resolution=1280",
@@ -115,19 +117,19 @@ def _run_job_worker(
         elif quality == "hd":
             overrides_list.extend([
                 "frames.max_long_edge=1920",
-                "frames.max_keyframes=42",
-                "pose.max_num_features=10240",
+                "frames.max_keyframes=300",
+                "pose.max_num_features=12288",
                 "dense.resolution_level=1",
-                "dense.max_resolution=1920",
+                "dense.max_resolution=2560",
                 "mesh.texture_size=4096",
             ])
         else:  # "balanced" / standard default
             overrides_list.extend([
                 "frames.max_long_edge=1600",
-                "frames.max_keyframes=26",
-                "pose.max_num_features=8192",
-                "dense.resolution_level=2",
-                "dense.max_resolution=1600",
+                "frames.max_keyframes=180",
+                "pose.max_num_features=10240",
+                "dense.resolution_level=1",
+                "dense.max_resolution=1920",
                 "mesh.texture_size=4096",
             ])
 
@@ -422,17 +424,38 @@ def get_model_glb(run_id: str) -> FileResponse:
 
 @app.api_route("/api/runs/{run_id}/model_alt.glb", methods=["GET", "HEAD"])
 def get_model_alt_glb(run_id: str) -> FileResponse:
-    """The second texture variant, when stage 6 produced one.
-
-    Same geometry as ``model.glb``, same viewer frame, different atlas: one
-    textured with OpenMVS seam levelling on, one with it off.  404 when the run
-    has only a single variant, which is the normal case for a scene where seam
-    levelling worked.
-    """
+    """The alternate model (texture variant or 2.5D/3D counterpart)."""
     return FileResponse(
         str(_export_file(run_id, "model_alt.glb")),
         media_type="model/gltf-binary",
         filename="model_alt.glb",
+    )
+
+
+@app.api_route("/api/runs/{run_id}/model_2_5d.glb", methods=["GET", "HEAD"])
+def get_model_2_5d_glb(run_id: str) -> FileResponse:
+    """Dedicated 2.5D terrain surface model."""
+    target = _run_export_dir(run_id) / "model_2_5d.glb"
+    if not target.exists():
+        # Fall back to model_alt.glb or model.glb if 2.5d was the primary
+        target = _run_export_dir(run_id) / "model.glb"
+    return FileResponse(
+        str(target),
+        media_type="model/gltf-binary",
+        filename="model_2_5d.glb",
+    )
+
+
+@app.api_route("/api/runs/{run_id}/model_3d.glb", methods=["GET", "HEAD"])
+def get_model_3d_glb(run_id: str) -> FileResponse:
+    """Dedicated full 3D OpenMVS mesh model."""
+    target = _run_export_dir(run_id) / "model_3d.glb"
+    if not target.exists():
+        target = _run_export_dir(run_id) / "model.glb"
+    return FileResponse(
+        str(target),
+        media_type="model/gltf-binary",
+        filename="model_3d.glb",
     )
 
 

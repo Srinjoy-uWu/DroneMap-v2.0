@@ -190,6 +190,41 @@ class TestGenericCsv:
         times = [f["timestamp_s"] for f in fixes]
         assert times == sorted(times)
 
+    def test_airdata_unit_conversions_and_is_video_sync(self, tmp_path: Path):
+        airdata_text = textwrap.dedent("""\
+            time(millisecond),latitude,longitude,height_above_takeoff(feet),altitude_above_seaLevel(feet),speed(mph),gimbal_pitch(degrees),isVideo
+            0,33.031,-117.169,0.0,193.6,0.0,0.0,0
+            10000,33.031,-117.169,100.0,293.6,5.0,0.0,0
+            20000,33.032,-117.168,393.7,587.2,15.0,-90.0,1
+            21000,33.033,-117.167,393.7,587.2,15.0,-90.0,1
+            30000,33.031,-117.169,0.0,193.6,0.0,0.0,0
+        """)
+        csv_file = tmp_path / "airdata_test.csv"
+        csv_file.write_text(airdata_text, encoding="utf-8")
+        fixes = parse_csv(csv_file)
+        # Should only include the isVideo=1 rows (at 20000ms and 21000ms)
+        assert len(fixes) == 2
+        # Timestamp must be zeroed to video start (20000ms -> 0.0s, 21000ms -> 1.0s)
+        assert fixes[0]["timestamp_s"] == pytest.approx(0.0)
+        assert fixes[1]["timestamp_s"] == pytest.approx(1.0)
+        # Altitudes must be converted to metres (feet * 0.3048)
+        assert fixes[0]["agl_m"] == pytest.approx(393.7 * 0.3048, abs=0.01)
+        assert fixes[0]["alt_m"] == pytest.approx(587.2 * 0.3048, abs=0.01)
+        # Speed must be converted from mph to m/s (15.0 * 0.44704 = 6.7056 m/s)
+        assert fixes[0]["speed_mps"] == pytest.approx(15.0 * 0.44704, abs=0.01)
+        assert fixes[0]["gimbal_pitch"] == pytest.approx(-90.0)
+
+    def test_samples_airdata_file_if_present(self):
+        sample_path = Path("samples/Aug-30th-2022-12-59PM-Flight-Airdata.csv")
+        if not sample_path.exists():
+            pytest.skip("Airdata sample file not present")
+        fixes = parse_csv(sample_path)
+        assert len(fixes) > 2000
+        assert fixes[0]["timestamp_s"] == pytest.approx(0.0)
+        assert fixes[-1]["timestamp_s"] == pytest.approx(242.4, abs=0.5)
+        assert fixes[0]["gimbal_pitch"] == pytest.approx(-90.0)
+        assert 150.0 < fixes[0]["alt_m"] < 200.0
+
 
 # ---------------------------------------------------------------------------
 # Auto-detect (load())

@@ -435,13 +435,18 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     if use_opencv:
         cap = cv2.VideoCapture(str(video_path))
         idx = 0
+        analysis_scale = min(1.0, 960.0 / float(long_edge))
+        analysis_w = int(math.floor(width * analysis_scale / 2) * 2)
+        analysis_h = int(math.floor(height * analysis_scale / 2) * 2)
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            if long_edge > cfg.max_long_edge:
-                frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+            # Convert to grayscale first before resize for 4x faster processing
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            if analysis_w < width:
+                gray = cv2.resize(gray, (analysis_w, analysis_h), interpolation=cv2.INTER_LINEAR)
             sharpness_scores.append(_laplacian_variance(gray))
             flow_sampler.observe(idx, gray)
             idx += 1
@@ -507,6 +512,24 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
 
     # Telemetry parsing & alignment
     telemetry_raw_path = ws.manifest.get("input", {}).get("telemetry")
+    if not telemetry_raw_path or not Path(telemetry_raw_path).exists():
+        candidates = [
+            video_path.with_suffix(".srt"),
+            video_path.with_suffix(".csv"),
+        ]
+        if video_path.parent.exists():
+            candidates.extend(sorted(video_path.parent.glob("*Airdata*.csv"), key=lambda p: p.stat().st_size, reverse=True))
+            candidates.extend(sorted(video_path.parent.glob("*airdata*.csv"), key=lambda p: p.stat().st_size, reverse=True))
+            candidates.extend(sorted(video_path.parent.glob("*flight*.csv"), key=lambda p: p.stat().st_size, reverse=True))
+        for cand in candidates:
+            if cand.exists():
+                telemetry_raw_path = str(cand)
+                ctx.note(f"auto-discovered telemetry sidecar: {cand.name}")
+                ws.set_input(telemetry=str(cand))
+                from .workspace import GnssMode
+                ws.set_gnss(GnssMode.STANDALONE, source=str(cand), reason="auto-discovered telemetry sidecar")
+                break
+
     fixes: list[dict] = []
     if telemetry_raw_path and Path(telemetry_raw_path).exists():
         try:
@@ -670,7 +693,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                 ret, frame = cap.read()
                 if not ret:
                     break
-                extracted_frames[idx] = frame
+                extracted_frames[idx] = _resize_to_long_edge(frame, cfg.max_long_edge)
             else:
                 ret = cap.grab()
                 if not ret:

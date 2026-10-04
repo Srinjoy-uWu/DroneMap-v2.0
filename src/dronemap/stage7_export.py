@@ -202,16 +202,26 @@ def _compute_regional_confidence(points: np.ndarray) -> np.ndarray:
         return np.empty(0, dtype=np.uint8)
 
     try:
-        from scipy.spatial import cKDTree
-        tree = cKDTree(points[:, :2])
         extent = max(
             float(np.max(points[:, 0]) - np.min(points[:, 0])),
             float(np.max(points[:, 1]) - np.min(points[:, 1])),
             10.0,
         )
-        radius = max(0.5, extent / 150.0)
-        counts = tree.query_ball_point(points[:, :2], r=radius, return_sorted=False)
-        densities = np.array([len(c) for c in counts])
+        if n_pts > 50_000:
+            # High-performance grid cell density binning: O(N) in ~0.05 seconds
+            grid_res = max(1.0, extent / 150.0)
+            x_min, y_min = float(points[:, 0].min()), float(points[:, 1].min())
+            gx = ((points[:, 0] - x_min) / grid_res).astype(np.int64)
+            gy = ((points[:, 1] - y_min) / grid_res).astype(np.int64)
+            cell_keys = gx * 10_000_000 + gy
+            _, inv, counts = np.unique(cell_keys, return_inverse=True, return_counts=True)
+            densities = counts[inv]
+        else:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(points[:, :2])
+            radius = max(0.5, extent / 150.0)
+            counts = tree.query_ball_point(points[:, :2], r=radius, return_sorted=False)
+            densities = np.array([len(c) for c in counts])
 
         p25 = float(np.percentile(densities, 25))
         p75 = float(np.percentile(densities, 75))
@@ -612,15 +622,15 @@ def _rasterise_dsm(
     cols = max(1, int(math.ceil((x_max - x_min) / gsd)))
     rows = max(1, int(math.ceil((y_max - y_min) / gsd)))
 
-    dsm = np.full((rows, cols), fill_value=np.nan, dtype=np.float32)
-
     col_idx = ((xs - x_min) / gsd).astype(np.int32).clip(0, cols - 1)
     row_idx = ((y_max - ys) / gsd).astype(np.int32).clip(0, rows - 1)
 
-    # Keep maximum z (surface) in each cell
-    for c, r, z in zip(col_idx, row_idx, zs):
-        if np.isnan(dsm[r, c]) or z > dsm[r, c]:
-            dsm[r, c] = z
+    # Vectorized maximum z (surface) in each cell in O(N log N)
+    flat_dsm = np.full(rows * cols, fill_value=np.nan, dtype=np.float32)
+    flat_idx = row_idx.astype(np.int64) * cols + col_idx.astype(np.int64)
+    order = np.argsort(zs)
+    flat_dsm[flat_idx[order]] = zs[order].astype(np.float32)
+    dsm = flat_dsm.reshape((rows, cols))
 
     tf = from_bounds(x_min, y_min, x_max, y_max, cols, rows)
     with rasterio.open(
@@ -1609,6 +1619,24 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                     ctx.note(f"alternate-texture GLB export failed: {alt_exc}")
             elif alt_path.exists():
                 alt_path.unlink(missing_ok=True)
+
+            obj_2_5d = ws.stage("mesh").outputs.get("textured_obj_2_5d")
+            if obj_2_5d and Path(obj_2_5d).exists():
+                glb_2_5d = export_dir / "model_2_5d.glb"
+                try:
+                    _write_glb(Path(obj_2_5d), glb_2_5d, rotation)
+                    ctx.output(model_2_5d_glb=str(glb_2_5d))
+                except Exception as e_25:
+                    ctx.note(f"2.5D GLB export note: {e_25}")
+
+            obj_3d = ws.stage("mesh").outputs.get("textured_obj_3d")
+            if obj_3d and Path(obj_3d).exists():
+                glb_3d = export_dir / "model_3d.glb"
+                try:
+                    _write_glb(Path(obj_3d), glb_3d, rotation)
+                    ctx.output(model_3d_glb=str(glb_3d))
+                except Exception as e_3d:
+                    ctx.note(f"3D GLB export note: {e_3d}")
         except Exception as exc:
             ctx.note(f"GLB export failed: {exc}")
 
