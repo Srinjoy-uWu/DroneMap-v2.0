@@ -405,3 +405,51 @@ def test_terrain_preserves_elevated_structure_leveling(tmp_path: Path):
     ground_heights = verts[ground_mask, 2]
     assert np.abs(np.median(ground_heights)) < 0.3
 
+
+def test_terrain_flattens_roads_and_despikes_trees(tmp_path: Path):
+    """Roads must stay flat and smooth while scattered tree canopy points do not create conical spires."""
+    rng = np.random.default_rng(101)
+    # Flat asphalt road: -30 <= x <= 30, -3 <= y <= 3, z = 0.0m
+    rx = rng.uniform(-30, 30, 800)
+    ry = rng.uniform(-3, 3, 800)
+    rz = rng.normal(0.0, 0.01, 800)
+    road = np.column_stack([rx, ry, rz])
+
+    # Trees alongside the road at y = 6 to 15m, with canopy points reaching 12m high
+    tx = rng.uniform(-20, 20, 400)
+    ty = rng.uniform(6, 15, 400)
+    tz = rng.uniform(2.0, 12.0, 400)  # scattered canopy returns
+    trees = np.column_stack([tx, ty, tz])
+
+    # Open ground around the road
+    gx = rng.uniform(-30, 30, 1000)
+    gy = rng.uniform(-20, 20, 1000)
+    gz = rng.normal(0.0, 0.03, 1000)
+    ground = np.column_stack([gx, gy, gz])
+
+    pts = np.vstack([road, trees, ground])
+    cols = np.full((len(pts), 3), 128, dtype=np.uint8)
+
+    out_obj = tmp_path / "road_despike.obj"
+    metrics = reconstruct_terrain_mesh(
+        points=pts,
+        colors=cols,
+        output_obj=out_obj,
+        grid_dim=50,
+        max_grid_dim=60,
+        up_hint=np.array([0.0, 0.0, 1.0]),
+        is_georef=True,
+    )
+
+    mesh = trimesh.load(str(out_obj), process=False)
+    verts = mesh.vertices
+
+    # Check road vertices (|y| <= 2.5)
+    road_mask = (np.abs(verts[:, 0]) <= 25) & (np.abs(verts[:, 1]) <= 2.5)
+    assert np.any(road_mask)
+    road_verts = verts[road_mask, 2]
+
+    # Road surface must remain flat near 0.0m, without conical spikes pulling it up
+    assert np.abs(np.mean(road_verts)) < 0.2
+    assert np.max(road_verts) < 0.8  # No 12m tree spikes pulling the road upward!
+

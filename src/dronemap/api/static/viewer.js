@@ -180,9 +180,9 @@ if (!canvas) {
   window.load3DModel = function(runId, variant) {
     variant = variant === 'alt' ? 'alt' : 'primary';
     window.currentVariant = variant;
-    const assetUrl = variant === 'alt'
+    const assetUrl = (variant === 'alt'
       ? `/api/runs/${runId}/model_alt.glb`
-      : `/api/runs/${runId}/model.glb`;
+      : `/api/runs/${runId}/model.glb`) + `?v=${Date.now()}`;
 
     const btnPrimary = document.getElementById('btn-variant-primary');
     const btnAlt = document.getElementById('btn-variant-alt');

@@ -349,6 +349,22 @@ document.addEventListener('DOMContentLoaded', () => {
       const m = await res.json();
       const outs = ((m.stages || {}).mesh || {}).outputs || {};
       const which = outs.textured_obj_alt_label;
+      if (which === 'terrain_2.5d' || which === 'terrain' || which === 'terrain_mesh') {
+        return {
+          primary: '3D Mesh',
+          primaryTitle: 'Full 3D photogrammetric mesh with vertical structure relief',
+          alt: '2.5D Terrain',
+          altTitle: '2.5D leveled surface elevation model',
+        };
+      }
+      if (which === 'openmvs_3d' || which === '3d') {
+        return {
+          primary: '2.5D Terrain',
+          primaryTitle: '2.5D leveled surface elevation model',
+          alt: '3D Mesh',
+          altTitle: 'Full 3D photogrammetric mesh with vertical structure relief',
+        };
+      }
       if (which === 'seam_levelled') {
         return {
           primary: 'No Seam Levelling',

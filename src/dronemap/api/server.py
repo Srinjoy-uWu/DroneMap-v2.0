@@ -121,7 +121,7 @@ def _run_job_worker(
                 "pose.max_num_features=12288",
                 "dense.resolution_level=1",
                 "dense.max_resolution=2560",
-                "mesh.texture_size=4096",
+                "mesh.texture_size=8192",
             ])
         else:  # "balanced" / standard default
             overrides_list.extend([
@@ -130,7 +130,7 @@ def _run_job_worker(
                 "pose.max_num_features=10240",
                 "dense.resolution_level=1",
                 "dense.max_resolution=1920",
-                "mesh.texture_size=4096",
+                "mesh.texture_size=8192",
             ])
 
         cfg = load_config(

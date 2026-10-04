@@ -275,22 +275,19 @@ def reconstruct_terrain_mesh(
     max_tilt_deg: float = MAX_GROUND_TILT_DEG,
     texture_size: int = 4096,
     is_georef: bool = False,
+    labels: np.ndarray | None = None,
 ) -> dict[str, int | float | str]:
     """Build a solid, non-deformed 2.5D terrain surface mesh from 3D points.
 
-    Key improvements over naive regular-grid IDW:
-    1. Data Support Masking: Discards grid nodes and triangles that lie outside
-       the actual survey footprint (distance to nearest point > 2.5x cell size).
-       This completely eliminates sagging border curtains, corner droops, and
-       30m stretched triangles.
-    2. Regularized Elevation & Outlier Suppression: Avoids singular 1/d^2 spikes
-       and removes local height outliers so noise/vegetation points cannot create
-       artificial cones.
-    3. Analytical Surface Normals: Computes gradients directly on the elevation
-       field to bake smooth vertex normals into the OBJ/PLY/GLB, guaranteeing
-       continuous PBR shading in 3D viewers.
-    4. High-Resolution Texture Atlas: Upsamples and antialiases the surface
-       texture to 2048x2048 for crisp, photorealistic terrain appearance.
+    Key improvements:
+    1. Data Support Masking: Discards grid nodes and triangles outside survey footprint.
+    2. Road & Ground Datum Leveling: Robust percentile estimation extracts the true continuous
+       ground and road surface without being warped by aerial floaters or roadside trees.
+    3. Elevated Structure Preservation: Coherent planar building rooftops are preserved at true
+       elevations while isolated vegetation canopy spikes are de-spiked.
+    4. Direct Point-Cloud 4K/8K Texture Atlas: Accumulates all dense points directly into the
+       texture image with hierarchical inpainting, capturing crisp road markings, asphalt texture,
+       and roof details.
     """
     import cv2
     import scipy.ndimage
@@ -340,7 +337,7 @@ def reconstruct_terrain_mesh(
     inpainted_mask = (filled_valid & ~direct_valid).astype(np.uint8)
     valid_node = filled_valid.ravel()
 
-    k_query = min(max(k_neighbors, 12), len(points))
+    k_query = min(max(k_neighbors, 16), len(points))
     dists, idxs = tree.query(grid_xy, k=k_query)
     if k_query == 1:
         dists = dists[:, None]
@@ -349,40 +346,42 @@ def reconstruct_terrain_mesh(
     local_z = pts_rot[idxs, 2]
 
     # Surface height estimation:
-    # 1. Reject aerial floaters/noise: points > 4m above the 90th percentile of local column
-    p90_z = np.percentile(local_z, 90, axis=1, keepdims=True)
-    floater_mask = (local_z - p90_z) > 4.0
+    # 1. Base ground and road datum:
+    # Ground/road returns always occupy the lower envelope of point returns.
+    # The 20th percentile captures the smooth, continuous road and ground surface without tree interference.
+    z_ground = np.percentile(local_z, 20, axis=1)
 
-    # 2. Distance-based weights regularized by cell size
-    reg_eps = max(0.25 * cell_size, 0.05)
-    w_dist = 1.0 / (np.maximum(dists, 1e-4) + reg_eps)**2
-    w_dist[floater_mask] = 0.0
+    # 2. Elevated structure detection:
+    # Identify cells that represent genuine planar buildings or structures (e.g. flat/sloped roofs)
+    # vs scattered tree foliage or isolated spikes.
+    mask_elev = local_z > (z_ground[:, None] + 1.2)
+    count_elev = np.sum(mask_elev, axis=1)
 
-    # 3. Surface tier clustering:
-    # The closest horizontal point dictates whether this cell belongs to a structure (roof) or ground.
-    # We weight points by elevation consistency with the closest non-floater point.
-    z_ref = local_z[:, 0]
-    z_dev = np.abs(local_z - z_ref[:, None])
-    # Elevation scale: sigma = 1.5m ensures points within 1.5m (same roof or ground) have strong weight,
-    # while points > 3m away vertically (ground below a roof, or roof above ground) are sharply excluded.
-    w_elev = np.exp(-0.5 * (z_dev / 1.5)**2)
+    sum_elev = np.sum(np.where(mask_elev, local_z, 0.0), axis=1)
+    mean_elev = sum_elev / np.maximum(count_elev, 1)
+    sq_diff_elev = np.sum(np.where(mask_elev, (local_z - mean_elev[:, None]) ** 2, 0.0), axis=1)
+    std_elev = np.sqrt(sq_diff_elev / np.maximum(count_elev, 1))
 
-    weights = w_dist * w_elev
-    weight_sum = weights.sum(axis=1, keepdims=True)
-    zero_weights = (weight_sum[:, 0] == 0)
-    if np.any(zero_weights):
-        weights[zero_weights] = w_dist[zero_weights]
-        weight_sum = weights.sum(axis=1, keepdims=True)
-    weights /= np.maximum(weight_sum, 1e-12)
+    # Coherent structures have multiple points agreeing tightly on elevation (std <= 0.65m)
+    # Trees have wide vertical scatter (leaves across meters, std > 1.0m) and are de-spiked.
+    is_structure = (count_elev >= 3) & (std_elev <= 0.65)
 
-    gz = np.sum(weights * local_z, axis=1)
+    if labels is not None and len(labels) == len(points):
+        # CLASS_STRUCTURE = 4, CLASS_VEGETATION = 3, CLASS_TERRAIN = 2
+        local_labels = labels[idxs]
+        struct_pts_count = np.sum(local_labels == 4, axis=1)
+        veg_pts_count = np.sum(local_labels == 3, axis=1)
+        is_structure = is_structure | ((struct_pts_count >= 3) & (struct_pts_count > veg_pts_count) & (count_elev >= 2))
+        is_structure = is_structure & ~((veg_pts_count >= 4) & (struct_pts_count == 0))
+
+    gz = np.where(is_structure, mean_elev, z_ground)
 
     # 4. Edge-preserving 3D Bilateral Filtering
     Z_grid = gz.reshape((ny, nx)).astype(np.float32)
     Valid_grid = filled_valid
     try:
-        # Sharp edge-preserving threshold: 0.65m prevents smoothing across vertical walls/steps (>= 1m)
-        # while beautifully planarizing flat roofs and level ground terrain.
+        # Sharp edge-preserving threshold: 0.65m prevents smoothing across vertical building walls (>= 1m)
+        # while planarizing flat roofs and silky smooth roads.
         Z_bilat = cv2.bilateralFilter(
             Z_grid, d=5, sigmaColor=0.65, sigmaSpace=1.5
         )
@@ -403,30 +402,45 @@ def reconstruct_terrain_mesh(
     V_rot = np.column_stack([grid_xy, gz])
     V_orig = V_rot @ plane.rotation + center
 
-    # 7. Triangulation with strict boundary support masking
-    faces = []
-    for r in range(ny - 1):
-        for c in range(nx - 1):
-            i0 = r * nx + c
-            i1 = r * nx + (c + 1)
-            i2 = (r + 1) * nx + c
-            i3 = (r + 1) * nx + (c + 1)
-            if valid_node[i0] and valid_node[i1] and valid_node[i2]:
-                faces.append([i0, i1, i2])
-            if valid_node[i1] and valid_node[i3] and valid_node[i2]:
-                faces.append([i1, i3, i2])
+    # 7. Triangulation: Shorter 3D Diagonal Delaunay Quad Splitting
+    # Eliminates directional diagonal banding and produces an aesthetic, uniform wireframe
+    # that naturally hugs ridgelines, roads, and structure steps.
+    r_idx = np.arange(ny - 1)[:, None]
+    c_idx = np.arange(nx - 1)[None, :]
 
-    if not faces:
+    i0 = (r_idx * nx + c_idx).ravel()
+    i1 = (r_idx * nx + (c_idx + 1)).ravel()
+    i2 = ((r_idx + 1) * nx + c_idx).ravel()
+    i3 = ((r_idx + 1) * nx + (c_idx + 1)).ravel()
+
+    # Valid quad when all 4 corner nodes have support
+    valid_quad = valid_node[i0] & valid_node[i1] & valid_node[i2] & valid_node[i3]
+
+    if np.any(valid_quad):
+        i0_v, i1_v, i2_v, i3_v = i0[valid_quad], i1[valid_quad], i2[valid_quad], i3[valid_quad]
+        d03_sq = np.sum((V_orig[i0_v] - V_orig[i3_v]) ** 2, axis=1)
+        d12_sq = np.sum((V_orig[i1_v] - V_orig[i2_v]) ** 2, axis=1)
+        use_03 = d03_sq < d12_sq
+
+        t1_a = np.column_stack([i0_v[use_03], i1_v[use_03], i3_v[use_03]])
+        t1_b = np.column_stack([i0_v[use_03], i3_v[use_03], i2_v[use_03]])
+        t2_a = np.column_stack([i0_v[~use_03], i1_v[~use_03], i2_v[~use_03]])
+        t2_b = np.column_stack([i1_v[~use_03], i3_v[~use_03], i2_v[~use_03]])
+
+        faces_arr = np.vstack([t1_a, t1_b, t2_a, t2_b]).astype(np.int32)
+    else:
+        # Fallback for sparse bounds
+        faces = []
         for r in range(ny - 1):
             for c in range(nx - 1):
-                i0 = r * nx + c
-                i1 = r * nx + (c + 1)
-                i2 = (r + 1) * nx + c
-                i3 = (r + 1) * nx + (c + 1)
-                faces.append([i0, i1, i2])
-                faces.append([i1, i3, i2])
+                j0 = r * nx + c
+                j1 = r * nx + (c + 1)
+                j2 = (r + 1) * nx + c
+                j3 = (r + 1) * nx + (c + 1)
+                faces.append([j0, j1, j2])
+                faces.append([j1, j3, j2])
+        faces_arr = np.array(faces, dtype=np.int32)
 
-    faces_arr = np.array(faces, dtype=np.int32)
     used_indices = np.unique(faces_arr)
     index_map = np.full(len(grid_xy), -1, dtype=np.int32)
     index_map[used_indices] = np.arange(len(used_indices), dtype=np.int32)
@@ -441,41 +455,51 @@ def reconstruct_terrain_mesh(
     N_used = N_orig[used_indices]
     UV_used = uv[used_indices]
 
-    # 8. High-resolution texture atlas generation + Telea hole inpainting
+    # 8. High-Resolution Direct Point-Cloud Texture Atlas (No Downsampling Blur)
+    tex_res = min(max(texture_size, 512), 8192)
     if colors is not None and len(colors) == len(points):
-        # 3D proximity-based color weighting so roof gets roof colors, ground gets ground colors
-        diff_z = local_z - gz[:, None]
-        d_3d = np.sqrt(dists**2 + diff_z**2)
-        w_col = 1.0 / (np.maximum(d_3d, 1e-4) + 0.05 * cell_size) ** 3
-        w_col /= np.maximum(w_col.sum(axis=1, keepdims=True), 1e-12)
-        gr = np.clip(np.sum(w_col * colors[idxs, 0], axis=1), 0, 255).astype(np.uint8)
-        gg = np.clip(np.sum(w_col * colors[idxs, 1], axis=1), 0, 255).astype(np.uint8)
-        gb = np.clip(np.sum(w_col * colors[idxs, 2], axis=1), 0, 255).astype(np.uint8)
+        u_pts = (pts_rot[:, 0] - x_min) / max(dx, 1e-6)
+        v_pts = (pts_rot[:, 1] - y_min) / max(dy, 1e-6)
+        valid_pts = (u_pts >= 0.0) & (u_pts <= 1.0) & (v_pts >= 0.0) & (v_pts <= 1.0)
+
+        col_pts = np.clip((u_pts[valid_pts] * (tex_res - 1)).astype(np.int32), 0, tex_res - 1)
+        row_pts = np.clip(((1.0 - v_pts[valid_pts]) * (tex_res - 1)).astype(np.int32), 0, tex_res - 1)
+        lin_idx = row_pts * tex_res + col_pts
+        val_colors = colors[valid_pts]
+
+        count = np.bincount(lin_idx, minlength=tex_res * tex_res)
+        has_sample = count > 0
+
+        r_acc = np.bincount(lin_idx, weights=val_colors[:, 0], minlength=tex_res * tex_res)
+        g_acc = np.bincount(lin_idx, weights=val_colors[:, 1], minlength=tex_res * tex_res)
+        b_acc = np.bincount(lin_idx, weights=val_colors[:, 2], minlength=tex_res * tex_res)
+
+        tex_flat = np.full((tex_res * tex_res, 3), 160, dtype=np.uint8)
+        tex_flat[has_sample, 0] = np.clip(r_acc[has_sample] / count[has_sample], 0, 255).astype(np.uint8)
+        tex_flat[has_sample, 1] = np.clip(g_acc[has_sample] / count[has_sample], 0, 255).astype(np.uint8)
+        tex_flat[has_sample, 2] = np.clip(b_acc[has_sample] / count[has_sample], 0, 255).astype(np.uint8)
+
+        tex_img = tex_flat.reshape((tex_res, tex_res, 3))
+        tex_mask = (has_sample.reshape((tex_res, tex_res))).astype(np.uint8) * 255
+
+        # Multi-scale full-resolution dilation: NEVER downsamples to 256x256,
+        # ensuring 100% 4K/8K razor-sharp texture clarity across middle and edge areas.
+        kernel5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        dil1 = cv2.dilate(tex_img, kernel5, iterations=2)
+        tex_filled = np.where(tex_mask[:, :, None] > 0, tex_img, dil1)
+
+        mask_dil1 = cv2.dilate(tex_mask, kernel5, iterations=2)
+        if int((mask_dil1 == 0).sum()) > 0:
+            kernel7 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            dil2 = cv2.dilate(tex_filled, kernel7, iterations=3)
+            tex_img = np.where(mask_dil1[:, :, None] > 0, tex_filled, dil2)
+        else:
+            tex_img = tex_filled
     else:
-        gr = np.full(len(gz), 180, dtype=np.uint8)
-        gg = np.full(len(gz), 180, dtype=np.uint8)
-        gb = np.full(len(gz), 180, dtype=np.uint8)
+        tex_img = np.full((tex_res, tex_res, 3), 180, dtype=np.uint8)
 
-    base_tex = np.column_stack([gr, gg, gb]).reshape((ny, nx, 3))
-    if int(inpainted_mask.sum()) > 0:
-        try:
-            base_tex = cv2.inpaint(base_tex, inpainted_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
-        except Exception:
-            pass
-
-    tex_res = min(max(texture_size, 1024), 8192)
-    if (ny, nx) != (tex_res, tex_res):
-        tex_img = cv2.resize(base_tex, (tex_res, tex_res), interpolation=cv2.INTER_LANCZOS4)
-        try:
-            blur_tex = cv2.GaussianBlur(tex_img, (0, 0), sigmaX=1.2)
-            tex_img = cv2.addWeighted(tex_img, 1.25, blur_tex, -0.25, 0)
-        except Exception:
-            pass
-    else:
-        tex_img = base_tex
-
-    # Flip vertically to match glTF UV convention (v=0 at bottom of image)
-    tex_img = np.flipud(tex_img)
+    # In OBJ/glTF conventions, v=0 maps to image bottom and v=1 to image top.
+    # Since row 0 is v=1 and row tex_res-1 is v=0, tex_img already matches UV coordinates directly.
     pil_img = Image.fromarray(tex_img)
     visual = trimesh.visual.TextureVisuals(uv=UV_used, image=pil_img)
 

@@ -365,6 +365,7 @@ def _run_terrain_mesh(
         max_tilt_deg=cfg.terrain_max_tilt_deg if is_georef else max(cfg.terrain_max_tilt_deg, 60.0),
         texture_size=cfg.texture_size,
         is_georef=is_georef,
+        labels=getattr(sem_res, "labels", None) if sem_res is not None else None,
     )
     if metrics["ground_plane_source"] == "fit_rejected":
         ctx.note(
@@ -506,7 +507,10 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                 "reconstructing 3D structure-preserving mesh from conditioned 3D cloud"
             )
             _run_terrain_mesh(ws, cfg, dense_ply, ctx, preloaded_sem=sem_res)
-            return
+            # If dense MVS project is available, continue to 3D reconstruction so BOTH 2.5D and 3D models are produced!
+            if not (ws.dense_dir / "scene_dense.mvs").exists():
+                return
+            ctx.note("Dense MVS project present; continuing to full 3D surface reconstruction to generate both models")
     except Exception as exc:
         ctx.note(f"3D semantic conditioning note: {exc}")
 
@@ -651,7 +655,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     texture_mvs  = ws.mesh_dir / f"{texture_stem}.mvs"
     textured_obj = ws.mesh_dir / f"{texture_stem}.obj"
 
-    def _texture(target: Path, out_mvs: Path, *, seam_leveling: bool) -> None:
+    def _texture(target: Path, out_mvs: Path, *, seam_leveling: bool, tex_size: int | None = None) -> None:
         """Invoke TextureMesh, optionally with both seam-levelling passes off.
 
         ``--global-seam-leveling`` and ``--local-seam-leveling`` default to on
@@ -659,13 +663,14 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         ``measure_atlas_coverage``.  They are only disabled on the retry, so a
         scene they handle correctly keeps the better-blended result.
         """
+        eff_size = tex_size if tex_size is not None else cfg.texture_size
         args = [
             str(dense_mvs),
             "--working-folder", str(ws.dense_dir),
             "-m", str(target),
             "-o", str(out_mvs),
             "--export-type", "obj",
-            "--texture-size", str(cfg.texture_size),
+            "--texture-size", str(eff_size),
         ]
         if not seam_leveling:
             args += ["--global-seam-leveling", "0", "--local-seam-leveling", "0"]
@@ -678,32 +683,43 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     try:
         _texture(best_ply, texture_mvs, seam_leveling=cfg.seam_leveling)
     except Exception as exc:
-        fallback_target = None
-        if raw_mesh_ply.exists() and raw_mesh_ply != best_ply:
-            fallback_target = raw_mesh_ply
-        elif clean_raw_ply.exists() and clean_raw_ply != best_ply:
-            fallback_target = clean_raw_ply
-
-        if fallback_target is not None:
-            ctx.note(f"TextureMesh failed on {best_ply.name}; falling back to {fallback_target.name}")
-            texture_stem = fallback_target.stem + "_texture"
-            texture_mvs  = ws.mesh_dir / f"{texture_stem}.mvs"
-            textured_obj = ws.mesh_dir / f"{texture_stem}.obj"
+        if cfg.texture_size < 8192:
+            ctx.note(
+                f"TextureMesh failed with texture_size={cfg.texture_size} ({exc}); "
+                "retrying with 8192 atlas resolution to prevent patch packing overflow..."
+            )
             try:
-                _texture(fallback_target, texture_mvs, seam_leveling=cfg.seam_leveling)
-                best_ply = fallback_target
-            except Exception as inner_tex_exc:
+                _texture(best_ply, texture_mvs, seam_leveling=cfg.seam_leveling, tex_size=8192)
+            except Exception as retry_exc:
+                exc = retry_exc
+
+        if not textured_obj.exists():
+            fallback_target = None
+            if raw_mesh_ply.exists() and raw_mesh_ply != best_ply:
+                fallback_target = raw_mesh_ply
+            elif clean_raw_ply.exists() and clean_raw_ply != best_ply:
+                fallback_target = clean_raw_ply
+
+            if fallback_target is not None:
+                ctx.note(f"TextureMesh failed on {best_ply.name}; falling back to {fallback_target.name}")
+                texture_stem = fallback_target.stem + "_texture"
+                texture_mvs  = ws.mesh_dir / f"{texture_stem}.mvs"
+                textured_obj = ws.mesh_dir / f"{texture_stem}.obj"
+                try:
+                    _texture(fallback_target, texture_mvs, seam_leveling=cfg.seam_leveling, tex_size=8192)
+                    best_ply = fallback_target
+                except Exception as inner_tex_exc:
+                    if cfg.mode == "auto":
+                        ctx.note(f"TextureMesh failed ({inner_tex_exc}); recovering via 2.5D terrain reconstruction")
+                        _run_terrain_mesh(ws, cfg, dense_ply, ctx, preloaded_sem=sem_res)
+                        return
+                    raise
+            else:
                 if cfg.mode == "auto":
-                    ctx.note(f"TextureMesh failed ({inner_tex_exc}); recovering via 2.5D terrain reconstruction")
-                    _run_terrain_mesh(ws, cfg, dense_ply, ctx)
+                    ctx.note(f"TextureMesh failed ({exc}); recovering via 2.5D terrain reconstruction")
+                    _run_terrain_mesh(ws, cfg, dense_ply, ctx, preloaded_sem=sem_res)
                     return
-                raise
-        else:
-            if cfg.mode == "auto":
-                ctx.note(f"TextureMesh failed ({exc}); recovering via 2.5D terrain reconstruction")
-                _run_terrain_mesh(ws, cfg, dense_ply, ctx)
-                return
-            raise exc
+                raise exc
 
     if not textured_obj.exists():
         if cfg.mode == "auto":
