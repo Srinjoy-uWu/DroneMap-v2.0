@@ -271,6 +271,30 @@ if (!canvas) {
     geom.userData.originalColorAttr = geom.attributes.color ? geom.attributes.color.clone() : null;
   }
 
+  function updateWireframeOverlay(child, isVisible) {
+    if (!child.isMesh || !child.geometry) return;
+    if (!child.userData.wireframeMesh) {
+      if (!child.geometry.userData.semanticColorAttr) {
+        computeDistinctionAttributes(child);
+      }
+      const wireMat = new THREE.MeshBasicMaterial({
+        wireframe: true,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.92,
+        depthTest: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -2,
+      });
+      const wire = new THREE.Mesh(child.geometry, wireMat);
+      wire.renderOrder = 2;
+      child.add(wire);
+      child.userData.wireframeMesh = wire;
+    }
+    child.userData.wireframeMesh.visible = isVisible;
+  }
+
   // Shading Controller
   function applyShadingMode(mode) {
     activeShadingMode = mode;
@@ -455,6 +479,9 @@ if (!canvas) {
               child.material.needsUpdate = true;
             }
             computeDistinctionAttributes(child);
+            if (chkWireframe && chkWireframe.checked) {
+              updateWireframeOverlay(child, true);
+            }
             child.castShadow = true;
             child.receiveShadow = true;
           }
@@ -690,9 +717,10 @@ if (!canvas) {
   if (chkWireframe) {
     chkWireframe.addEventListener('change', (e) => {
       if (!currentModel) return;
+      const isVisible = e.target.checked;
       currentModel.traverse((child) => {
-        if (child.isMesh && child.material) {
-          child.material.wireframe = e.target.checked;
+        if (child.isMesh) {
+          updateWireframeOverlay(child, isVisible);
         }
       });
     });
