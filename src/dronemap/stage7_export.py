@@ -511,6 +511,50 @@ def _patch_glb_materials(out_path: Path) -> None:
     )
 
 
+def _despike_and_smooth_geometry(geom: "trimesh.Trimesh") -> None:
+    """Remove random Delaunay needle peaks and smooth high-frequency noise.
+
+    Uses fast vectorized 1-ring neighbor clamping to remove sharp spikes,
+    followed by volume-preserving Taubin smoothing so tree canopies follow natural
+    organic curvature, roads are smooth, and rooftops are leveled without shrinkage.
+    """
+    try:
+        import scipy.sparse as sp
+        V = np.asarray(geom.vertices, dtype=np.float64).copy()
+        edges = geom.edges_unique
+        n_v = len(V)
+        if n_v < 64 or len(edges) < 64:
+            return
+        row = np.concatenate([edges[:, 0], edges[:, 1]])
+        col = np.concatenate([edges[:, 1], edges[:, 0]])
+        data = np.ones(len(row), dtype=np.float32)
+        A = sp.csr_matrix((data, (row, col)), shape=(n_v, n_v))
+        deg = np.maximum(np.array(A.sum(axis=1)).ravel(), 1.0)
+
+        # 1. Despike needle peaks (> 2.0x median edge length away from 1-ring centroid)
+        edge_lens = np.linalg.norm(V[edges[:, 0]] - V[edges[:, 1]], axis=1)
+        med_edge = float(np.median(edge_lens))
+        if med_edge > 1e-4:
+            for _ in range(2):
+                nbr_means = A.dot(V) / deg[:, None]
+                diffs = np.linalg.norm(V - nbr_means, axis=1)
+                spikes = diffs > 2.0 * med_edge
+                if not np.any(spikes):
+                    break
+                V[spikes] = nbr_means[spikes]
+
+        # 2. Taubin volume-preserving smoothing (lamb=0.33, nu=-0.34)
+        for _ in range(4):
+            L1 = (A.dot(V) / deg[:, None]) - V
+            V += 0.33 * L1
+            L2 = (A.dot(V) / deg[:, None]) - V
+            V -= 0.34 * L2
+
+        geom.vertices = V
+    except Exception:
+        pass
+
+
 def _write_glb(obj_path: Path, out_path: Path, rotation: np.ndarray | None = None) -> dict:
     """Convert OBJ + MTL + textures to a single GLB binary.
 
@@ -532,16 +576,10 @@ def _write_glb(obj_path: Path, out_path: Path, rotation: np.ndarray | None = Non
 
     scene = trimesh.load(str(obj_path), force="scene")
 
-    # Compute and bake vertex normals into every geometry before export.
-    # OpenMVS OBJ exports omit vertex normals, so trimesh writes the GLB with
-    # only POSITION + TEXCOORD_0 accessors and no NORMAL accessor.  glTF
-    # viewers (and Three.js) fall back to flat / face normals, which looks
-    # faceted and loses smooth shading on curved surfaces.
+    # Smooth out random peaks/corners and compute and bake vertex normals into every geometry.
     for geom in scene.geometry.values():
         try:
-            # Accessing .vertex_normals forces trimesh to compute and cache them.
-            # This triggers the lazy computation on meshes that have no
-            # pre-existing normals, so the normals are present when export runs.
+            _despike_and_smooth_geometry(geom)
             if hasattr(geom, "vertex_normals") and geom.vertex_normals is not None:
                 # Touch to ensure it is stored internally before export.
                 _ = np.asarray(geom.vertex_normals)

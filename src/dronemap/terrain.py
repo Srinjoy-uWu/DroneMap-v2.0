@@ -396,6 +396,32 @@ def reconstruct_terrain_mesh(
         is_structure = is_structure & ~((veg_pts_count >= 5) & (struct_pts_count == 0))
         is_vegetation = is_vegetation | ((veg_pts_count >= 3) & (veg_pts_count >= struct_pts_count))
 
+    # 1. Smooth roads to flat, silky-smooth planar pavement
+    road_grid = is_road.reshape((ny, nx))
+    if np.any(road_grid):
+        z_road_grid = z_road.reshape((ny, nx))
+        road_smooth = scipy.ndimage.gaussian_filter(z_road_grid, sigma=1.0)
+        z_road = np.where(is_road, road_smooth.ravel(), z_road)
+
+    # 2. Smooth tree canopy curvature so trees form organic, rounded curved crowns
+    veg_grid = is_vegetation.reshape((ny, nx))
+    if np.any(veg_grid):
+        z_veg_grid = z_veg.reshape((ny, nx))
+        veg_smooth = scipy.ndimage.gaussian_filter(z_veg_grid, sigma=1.2)
+        z_veg = np.where(is_vegetation, veg_smooth.ravel(), z_veg)
+
+    # 3. Level building rooftops cleanly at proper heights with planar consensus
+    struct_grid = is_structure.reshape((ny, nx))
+    if np.any(struct_grid):
+        z_struct_grid = mean_elev.reshape((ny, nx))
+        labeled_struct, num_bld = scipy.ndimage.label(struct_grid)
+        for b_id in range(1, num_bld + 1):
+            b_mask = labeled_struct == b_id
+            if np.sum(b_mask) >= 3:
+                roof_datum = float(np.median(z_struct_grid[b_mask]))
+                z_struct_grid[b_mask] = roof_datum
+        mean_elev = np.where(is_structure, z_struct_grid.ravel(), mean_elev)
+
     # Synthesize multi-layer distinctive surface elevation:
     # Structures keep roof height, trees keep 3D canopy volume, poles keep vertical peaks, roads are level
     gz = np.where(
@@ -412,8 +438,12 @@ def reconstruct_terrain_mesh(
         ),
     )
 
-    # 4. Edge-preserving 3D Bilateral Filtering
+    # 4. Despike & Edge-preserving 3D Bilateral Filtering
     Z_grid = gz.reshape((ny, nx)).astype(np.float32)
+    Z_med = scipy.ndimage.median_filter(Z_grid, size=3)
+    is_spike = ((Z_grid - Z_med) > 1.2) & (~is_structure.reshape((ny, nx))) & (~is_pole.reshape((ny, nx)))
+    Z_grid = np.where(is_spike, Z_med, Z_grid)
+
     Valid_grid = filled_valid
     try:
         # Sharp edge-preserving threshold: 0.50m prevents smoothing across vertical building walls & tree steps (>= 1m)

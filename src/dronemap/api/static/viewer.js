@@ -149,9 +149,17 @@ if (!canvas) {
     const box = geom.boundingBox;
     const minY = box.min.y;
     const maxY = box.max.y;
-    const spanY = Math.max(maxY - minY, 0.001);
     const spanX = Math.max(box.max.x - box.min.x, 0.001);
     const spanZ = Math.max(box.max.z - box.min.z, 0.001);
+
+    // Compute robust Y percentile span (p02 to p98) to avoid compression from outlier floaters
+    const sampleStep = Math.max(1, Math.floor(count / 1500));
+    const sampleY = [];
+    for (let i = 0; i < count; i += sampleStep) sampleY.push(pos.getY(i));
+    sampleY.sort((a, b) => a - b);
+    const p02 = sampleY[Math.floor(sampleY.length * 0.02)] ?? minY;
+    const p98 = sampleY[Math.floor(sampleY.length * 0.98)] ?? maxY;
+    const robustSpanY = Math.max(p98 - p02, 1.0);
 
     const heightColors = new Float32Array(count * 3);
     const semanticColors = new Float32Array(count * 3);
@@ -165,17 +173,50 @@ if (!canvas) {
       return [Math.max(0, Math.min(1, r)), Math.max(0, Math.min(1, g)), Math.max(0, Math.min(1, b))];
     }
 
-    // Coarse 2D grid to extract the local bare-ground envelope for relative height
-    const gridRes = 32;
-    const groundGrid = new Float32Array(gridRes * gridRes).fill(Infinity);
-    for (let i = 0; i < count; i++) {
+    // Coarse 2D grid to compute local ground datum
+    const gridRes = 40;
+    const groundCells = Array.from({ length: gridRes * gridRes }, () => []);
+    for (let i = 0; i < count; i += Math.max(1, Math.floor(count / 15000))) {
       const x = pos.getX(i);
       const y = pos.getY(i);
       const z = pos.getZ(i);
       const gx = Math.max(0, Math.min(gridRes - 1, Math.floor(((x - box.min.x) / spanX) * gridRes)));
       const gz = Math.max(0, Math.min(gridRes - 1, Math.floor(((z - box.min.z) / spanZ) * gridRes)));
-      const gIdx = gz * gridRes + gx;
-      if (y < groundGrid[gIdx]) groundGrid[gIdx] = y;
+      groundCells[gz * gridRes + gx].push(y);
+    }
+
+    const groundGrid = new Float32Array(gridRes * gridRes).fill(NaN);
+    for (let idx = 0; idx < groundCells.length; idx++) {
+      const arr = groundCells[idx];
+      if (arr.length > 0) {
+        arr.sort((a, b) => a - b);
+        groundGrid[idx] = arr[Math.floor(arr.length * 0.15)];
+      }
+    }
+
+    // Fill missing cells with neighbor mean
+    let defaultGround = p02;
+    for (let gz = 0; gz < gridRes; gz++) {
+      for (let gx = 0; gx < gridRes; gx++) {
+        const idx = gz * gridRes + gx;
+        if (isNaN(groundGrid[idx])) {
+          let closestDist = Infinity;
+          let bestVal = defaultGround;
+          for (let oz = Math.max(0, gz - 4); oz <= Math.min(gridRes - 1, gz + 4); oz++) {
+            for (let ox = Math.max(0, gx - 4); ox <= Math.min(gridRes - 1, gx + 4); ox++) {
+              const oIdx = oz * gridRes + ox;
+              if (!isNaN(groundGrid[oIdx])) {
+                const d = (oz - gz) ** 2 + (ox - gx) ** 2;
+                if (d < closestDist) {
+                  closestDist = d;
+                  bestVal = groundGrid[oIdx];
+                }
+              }
+            }
+          }
+          groundGrid[idx] = bestVal;
+        }
+      }
     }
 
     for (let i = 0; i < count; i++) {
@@ -187,7 +228,7 @@ if (!canvas) {
       const nz = norm.getZ(i);
 
       // 1. Height map colors (absolute normalized elevation)
-      const normY = (y - minY) / spanY;
+      const normY = (y - p02) / robustSpanY;
       const [hr, hg, hb] = turboRGB(normY);
       heightColors[i * 3] = hr;
       heightColors[i * 3 + 1] = hg;
@@ -197,22 +238,22 @@ if (!canvas) {
       const gx = Math.max(0, Math.min(gridRes - 1, Math.floor(((x - box.min.x) / spanX) * gridRes)));
       const gz = Math.max(0, Math.min(gridRes - 1, Math.floor(((z - box.min.z) / spanZ) * gridRes)));
       const localBase = groundGrid[gz * gridRes + gx];
-      const relHeight = y - (isFinite(localBase) ? localBase : minY);
+      const relHeight = y - (isFinite(localBase) ? localBase : p02);
 
-      const isVertical = Math.abs(ny) < 0.60;
-      const isHorizontal = ny > 0.75;
+      const isVertical = Math.abs(ny) < 0.50;
+      const isUpward = ny > 0.65;
 
       let sr, sg, sb;
-      if (relHeight < 0.8 && isHorizontal) {
-        // Road / Asphalt: Dark Slate Charcoal (#334155)
-        sr = 0.22; sg = 0.26; sb = 0.33;
-      } else if (relHeight > 2.8 && (isVertical || (isHorizontal && relHeight > 3.8))) {
+      if (relHeight < 0.7 && isUpward) {
+        // Road / Asphalt: Dark Slate Charcoal (#3b4252)
+        sr = 0.23; sg = 0.26; sb = 0.32;
+      } else if (relHeight > 2.2 && (isVertical || (isUpward && relHeight > 3.0))) {
         // Houses / Buildings / Roofs: Terracotta Red (#e11d48)
         sr = 0.88; sg = 0.12; sb = 0.28;
-      } else if (relHeight > 1.2 && isVertical && (Math.abs(nx) > 0.65 || Math.abs(nz) > 0.65) && relHeight < 4.0) {
-        // Poles / Lampposts / Vertical Structures: Electric Cyan (#06b6d4)
+      } else if (relHeight > 1.2 && isVertical && (Math.abs(nx) > 0.60 || Math.abs(nz) > 0.60) && relHeight < 4.5) {
+        // Poles / Lampposts / Vertical Objects: Electric Cyan (#06b6d4)
         sr = 0.02; sg = 0.71; sb = 0.83;
-      } else if (relHeight >= 0.8) {
+      } else if (relHeight >= 0.7 && relHeight <= 18.0) {
         // Trees / Vegetation Canopy: Forest Emerald Green (#16a34a)
         sr = 0.09; sg = 0.64; sb = 0.29;
       } else {
@@ -251,49 +292,59 @@ if (!canvas) {
     if (!currentModel) return;
 
     currentModel.traverse((child) => {
-      // Only mesh nodes have a .material.
       if (!child.isMesh || !child.material) return;
       const geom = child.geometry;
+      if (!geom) return;
+
+      if (!geom.userData.semanticColorAttr || !geom.userData.heightColorAttr) {
+        computeDistinctionAttributes(child);
+      }
 
       if (mode === 'white') {
-        child.material.map = null;
-        child.material.vertexColors = false;
-        child.material.color.setHex(0xe2e8f0);
-        child.material.roughness = 0.55;
-        child.material.metalness = 0.04;
+        if (!child.userData.clayMaterial) {
+          child.userData.clayMaterial = new THREE.MeshStandardMaterial({
+            color: 0xe2e8f0,
+            roughness: 0.55,
+            metalness: 0.04,
+            side: THREE.DoubleSide,
+          });
+        }
+        child.material = child.userData.clayMaterial;
       } else if (mode === 'semantic') {
-        child.material.map = null;
-        if (geom && geom.userData.semanticColorAttr) {
+        if (!child.userData.distinctMaterial) {
+          child.userData.distinctMaterial = new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            roughness: 0.70,
+            metalness: 0.02,
+            side: THREE.DoubleSide,
+          });
+        }
+        if (geom.userData.semanticColorAttr) {
           geom.setAttribute('color', geom.userData.semanticColorAttr);
-          child.material.vertexColors = true;
-          child.material.color.setHex(0xffffff);
+          geom.attributes.color.needsUpdate = true;
         }
-        child.material.roughness = 0.65;
-        child.material.metalness = 0.0;
+        child.material = child.userData.distinctMaterial;
       } else if (mode === 'height') {
-        child.material.map = null;
-        if (geom && geom.userData.heightColorAttr) {
-          geom.setAttribute('color', geom.userData.heightColorAttr);
-          child.material.vertexColors = true;
-          child.material.color.setHex(0xffffff);
+        if (!child.userData.distinctMaterial) {
+          child.userData.distinctMaterial = new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            roughness: 0.70,
+            metalness: 0.02,
+            side: THREE.DoubleSide,
+          });
         }
-        child.material.roughness = 0.65;
-        child.material.metalness = 0.0;
+        if (geom.userData.heightColorAttr) {
+          geom.setAttribute('color', geom.userData.heightColorAttr);
+          geom.attributes.color.needsUpdate = true;
+        }
+        child.material = child.userData.distinctMaterial;
       } else if (mode === 'textured') {
-        if (child.userData.originalMap) {
-          child.material.map = child.userData.originalMap;
+        if (child.userData.originalMaterial) {
+          child.material = child.userData.originalMaterial;
         }
         if (geom && geom.userData.originalColorAttr) {
           geom.setAttribute('color', geom.userData.originalColorAttr);
-          child.material.vertexColors = true;
-        } else {
-          child.material.vertexColors = child.userData.hasVertexColors || false;
         }
-        if (child.userData.originalColor) {
-          child.material.color.copy(child.userData.originalColor);
-        }
-        child.material.roughness = 0.75;
-        child.material.metalness = 0.05;
       }
       child.material.needsUpdate = true;
     });
@@ -399,9 +450,11 @@ if (!canvas) {
                 child.material.map.needsUpdate = true;
                 child.userData.originalMap = child.material.map;
               }
+              child.userData.originalMaterial = child.material;
               child.userData.originalColor = child.material.color ? child.material.color.clone() : new THREE.Color(0xffffff);
               child.material.needsUpdate = true;
             }
+            computeDistinctionAttributes(child);
             child.castShadow = true;
             child.receiveShadow = true;
           }
