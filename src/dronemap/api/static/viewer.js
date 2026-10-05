@@ -128,6 +128,7 @@ if (!canvas) {
   const measurePill       = document.getElementById('measure-pill');
   const measurePillText   = document.getElementById('measure-pill-text');
   const measureResultCard = document.getElementById('measure-result');
+  const chkWireframe      = document.getElementById('chk-wireframe');
 
   const gltfLoader = new GLTFLoader();
 
@@ -615,7 +616,6 @@ if (!canvas) {
   const btnMeasure = document.getElementById('btn-measure');
   const btnCloseMeasure = document.getElementById('btn-close-measure');
   const btnReset = document.getElementById('btn-reset');
-  const chkWireframe = document.getElementById('chk-wireframe');
   const chkAutorotate = document.getElementById('chk-autorotate');
 
   const btnShadeTextured = document.getElementById('btn-shade-textured');
@@ -749,9 +749,10 @@ if (!canvas) {
   // Notify UI controller that viewer engine is ready
   window.viewerReady = true;
   window.dispatchEvent(new CustomEvent('viewer-ready'));
-  if (window.pendingRunId) {
-    console.log('[dronemap] viewer initialized; loading pending run:', window.pendingRunId);
-    window.load3DModel(window.pendingRunId);
+  const runToLoad = window.pendingRunId || window.currentRunId;
+  if (runToLoad && !currentModel) {
+    console.log('[dronemap] viewer initialized; loading run:', runToLoad);
+    window.load3DModel(runToLoad);
     window.pendingRunId = null;
   }
 } catch (err) {

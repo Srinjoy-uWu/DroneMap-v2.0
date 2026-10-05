@@ -2,7 +2,7 @@
    DroneMap — UI Controller (Simplified & Accessible)
    ============================================================ */
 
-document.addEventListener('DOMContentLoaded', () => {
+function initApp() {
   console.log('[dronemap] UI Controller initialized');
 
   // Prevent default browser drag/drop navigation
@@ -293,6 +293,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // Centralized Run Selection & Viewer Synchronization
   function selectRun(runId, hasModel = true) {
     window.currentRunId = runId;
+    const titleEl = document.getElementById('active-project-name');
+    if (titleEl) titleEl.textContent = runId;
     document.querySelectorAll('.run-card').forEach(c => {
       c.classList.toggle('selected', c.dataset.runId === runId);
     });
@@ -404,12 +406,17 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Listen for when 3D viewer finishes module initialization
-  window.addEventListener('viewer-ready', () => {
+  function onViewerReady() {
     if (window.currentRunId && window.load3DModel) {
       window.load3DModel(window.currentRunId);
       showTextureVariantToggle(window.currentRunId);
     }
-  });
+  }
+  if (window.viewerReady) {
+    onViewerReady();
+  } else {
+    window.addEventListener('viewer-ready', onViewerReady);
+  }
 
   // Sidebar Runs List & Reports
   async function fetchRuns(preferredRunId = null) {
@@ -859,4 +866,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   fetchRuns();
   window.fetchRuns = fetchRuns;
-});
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initApp);
+} else {
+  initApp();
+}
