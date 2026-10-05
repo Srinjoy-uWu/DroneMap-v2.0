@@ -512,47 +512,8 @@ def _patch_glb_materials(out_path: Path) -> None:
 
 
 def _despike_and_smooth_geometry(geom: "trimesh.Trimesh") -> None:
-    """Remove random Delaunay needle peaks and smooth high-frequency noise.
-
-    Uses fast vectorized 1-ring neighbor clamping to remove sharp spikes,
-    followed by volume-preserving Taubin smoothing so tree canopies follow natural
-    organic curvature, roads are smooth, and rooftops are leveled without shrinkage.
-    """
-    try:
-        import scipy.sparse as sp
-        V = np.asarray(geom.vertices, dtype=np.float64).copy()
-        edges = geom.edges_unique
-        n_v = len(V)
-        if n_v < 64 or len(edges) < 64:
-            return
-        row = np.concatenate([edges[:, 0], edges[:, 1]])
-        col = np.concatenate([edges[:, 1], edges[:, 0]])
-        data = np.ones(len(row), dtype=np.float32)
-        A = sp.csr_matrix((data, (row, col)), shape=(n_v, n_v))
-        deg = np.maximum(np.array(A.sum(axis=1)).ravel(), 1.0)
-
-        # 1. Despike needle peaks (> 2.0x median edge length away from 1-ring centroid)
-        edge_lens = np.linalg.norm(V[edges[:, 0]] - V[edges[:, 1]], axis=1)
-        med_edge = float(np.median(edge_lens))
-        if med_edge > 1e-4:
-            for _ in range(2):
-                nbr_means = A.dot(V) / deg[:, None]
-                diffs = np.linalg.norm(V - nbr_means, axis=1)
-                spikes = diffs > 2.0 * med_edge
-                if not np.any(spikes):
-                    break
-                V[spikes] = nbr_means[spikes]
-
-        # 2. Taubin volume-preserving smoothing (lamb=0.33, nu=-0.34)
-        for _ in range(4):
-            L1 = (A.dot(V) / deg[:, None]) - V
-            V += 0.33 * L1
-            L2 = (A.dot(V) / deg[:, None]) - V
-            V -= 0.34 * L2
-
-        geom.vertices = V
-    except Exception:
-        pass
+    """Preserve raw photogrammetric surface fidelity without destructive vertex distortion."""
+    return
 
 
 def _write_glb(
@@ -565,8 +526,8 @@ def _write_glb(
 
     ``rotation`` (3x3, orthonormal) is applied to the vertices before export so
     the viewer receives a Y-up model; see ``_viewer_frame_transform``.
-    If ``bedding_obj_path`` is provided, it is added as a ground floor geometry
-    underneath the 3D structure to close tree canopy and structural occlusions.
+    Preserves exact photogrammetric geometry with distinct buildings, sharp roads,
+    and detailed tree volumes without artificial mesh deformation.
     """
     try:
         import trimesh
@@ -575,22 +536,11 @@ def _write_glb(
 
     scene = trimesh.load(str(obj_path), force="scene")
 
-    # Smooth out random peaks/corners and compute and bake vertex normals into every geometry.
+    # Compute and bake vertex normals into every geometry for lighting stability.
     for geom in scene.geometry.values():
         try:
-            _despike_and_smooth_geometry(geom)
             if hasattr(geom, "vertex_normals") and geom.vertex_normals is not None:
-                # Touch to ensure it is stored internally before export.
                 _ = np.asarray(geom.vertex_normals)
-        except Exception:
-            pass  # If computation fails, export without normals; viewer computes them.
-
-    # Optional continuous bare-earth terrain bedding underneath 3D structures
-    if bedding_obj_path is not None and Path(bedding_obj_path).exists():
-        try:
-            bedding_scene = trimesh.load(str(bedding_obj_path), force="scene")
-            for b_name, b_geom in bedding_scene.geometry.items():
-                scene.add_geometry(b_geom, node_name=f"bedding_{b_name}")
         except Exception:
             pass
 
@@ -633,13 +583,6 @@ def _write_glb(
                 _bake_into_scene(scene, shift_flip)
     except Exception:
         pass
-
-    # If ground bedding was included, translate it downward by 0.08m in viewer frame (-Y)
-    # so that on open terrain the 3D surface stays on top with no z-fighting, while
-    # occluded tree cavities and eaves rest on solid ground texture.
-    for name, geom in scene.geometry.items():
-        if "bedding" in name and hasattr(geom, "apply_translation"):
-            geom.apply_translation([0.0, -0.08, 0.0])
 
     scene.export(str(out_path))
 
@@ -1635,14 +1578,10 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     if cfg.mesh_glb and textured_obj is not None:
         glb_path = export_dir / "model.glb"
         obj_2_5d = ws.stage("mesh").outputs.get("textured_obj_2_5d")
-        bedding_path = Path(obj_2_5d) if obj_2_5d and Path(obj_2_5d).exists() else None
 
         try:
             rotation, frame_info = _viewer_frame_transform(transform_info, ws=ws)
-            # When the primary model is the 3D reconstruction, include terrain bedding to eliminate tree/building occlusions
-            is_3d_primary = ws.stage("mesh").outputs.get("textured_obj_3d") == str(textured_obj)
-            bedding_for_primary = bedding_path if is_3d_primary else None
-            frame_info.update(_write_glb(textured_obj, glb_path, rotation, bedding_obj_path=bedding_for_primary))
+            frame_info.update(_write_glb(textured_obj, glb_path, rotation))
             ctx.output(model_glb=str(glb_path))
             ctx.metric(viewer_frame=frame_info)
             if frame_info.get("applied"):
@@ -1691,7 +1630,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             if obj_seam and Path(obj_seam).exists():
                 glb_seam = export_dir / "model_3d_seam.glb"
                 try:
-                    _write_glb(Path(obj_seam), glb_seam, rotation, bedding_obj_path=bedding_path)
+                    _write_glb(Path(obj_seam), glb_seam, rotation)
                     ctx.output(model_3d_seam_glb=str(glb_seam))
                     ctx.note(
                         "exported seam-levelled 3D mesh as model_3d_seam.glb for side-by-side comparison"
@@ -1711,7 +1650,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             if obj_3d and Path(obj_3d).exists():
                 glb_3d = export_dir / "model_3d.glb"
                 try:
-                    _write_glb(Path(obj_3d), glb_3d, rotation, bedding_obj_path=bedding_path)
+                    _write_glb(Path(obj_3d), glb_3d, rotation)
                     ctx.output(model_3d_glb=str(glb_3d))
                 except Exception as e_3d:
                     ctx.note(f"3D GLB export note: {e_3d}")
