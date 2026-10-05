@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DroneMap — Video to 3D Map</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=2.1.0" />
   <!-- Three.js Import Map (Must be in head before any script execution) -->
   <script type="importmap">
   {
@@ -242,16 +242,16 @@
 
       <div class="toolbar-divider"></div>
 
-      <!-- Model selection: 3D Vivid, 3D Seam-Levelled, 2.5D Terrain -->
+      <!-- Model selection: Solid Watertight Reconstruction (Primary), Raw 3D SfM Loop -->
       <div class="toolbar-group" id="grp-model-type">
-        <button id="btn-model-3d" class="tool-btn active" title="Full 3D Photogrammetric Mesh (Vivid True-Color)">
-          3D Vivid
+        <button id="btn-model-25d" class="tool-btn active" title="Watertight 3D Surface: Complete Footprint, Planar Roofs &amp; Leveled Roads (No Gaps)">
+          Solid 3D Surface
         </button>
-        <button id="btn-model-3d-seam" class="tool-btn" title="Full 3D Mesh with OpenMVS Poisson Seam-Leveling">
-          3D Seam-Levelled
+        <button id="btn-model-3d" class="tool-btn" title="Raw Photogrammetric Mesh (Direct OpenMVS Drone Loop SfM)">
+          Raw 3D Loop
         </button>
-        <button id="btn-model-25d" class="tool-btn" title="Levelled &amp; Smoothed 2.5D Delaunay Terrain Surface">
-          2.5D Terrain
+        <button id="btn-model-3d-seam" class="tool-btn" title="Raw OpenMVS Mesh with Poisson Seam-Leveling">
+          Raw 3D (Seam-Levelled)
         </button>
       </div>
 
@@ -555,9 +555,9 @@
   </div>
 
   <!-- Three.js Viewport (Vendored Offline Air-Gapped) -->
-  <script type="module" src="viewer.js"></script>
+  <script type="module" src="viewer.js?v=2.1.0"></script>
 
   <!-- UI Controller -->
-  <script src="app.js"></script>
+  <script src="app.js?v=2.1.0"></script>
 </body>
 </html>

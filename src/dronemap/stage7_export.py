@@ -1578,10 +1578,11 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     if cfg.mesh_glb and textured_obj is not None:
         glb_path = export_dir / "model.glb"
         obj_2_5d = ws.stage("mesh").outputs.get("textured_obj_2_5d")
+        primary_obj = Path(obj_2_5d) if (obj_2_5d and Path(obj_2_5d).exists()) else textured_obj
 
         try:
             rotation, frame_info = _viewer_frame_transform(transform_info, ws=ws)
-            frame_info.update(_write_glb(textured_obj, glb_path, rotation))
+            frame_info.update(_write_glb(primary_obj, glb_path, rotation))
             ctx.output(model_glb=str(glb_path))
             ctx.metric(viewer_frame=frame_info)
             if frame_info.get("applied"):
@@ -1646,7 +1647,9 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                 except Exception as e_25:
                     ctx.note(f"2.5D GLB export note: {e_25}")
 
-            obj_3d = ws.stage("mesh").outputs.get("textured_obj_3d")
+            obj_3d = ws.stage("mesh").outputs.get("textured_obj_3d") or (
+                str(textured_obj) if str(textured_obj) != str(primary_obj) else None
+            )
             if obj_3d and Path(obj_3d).exists():
                 glb_3d = export_dir / "model_3d.glb"
                 try:

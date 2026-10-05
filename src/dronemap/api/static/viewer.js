@@ -405,15 +405,15 @@ if (!canvas) {
     const btn3DSeam = document.getElementById('btn-model-3d-seam');
     const btn25D = document.getElementById('btn-model-25d');
 
-    const is3D = variant === '3d' || variant === 'primary';
+    const is25D = variant === 'primary' || variant === '2_5d' || variant === 'terrain';
+    const is3D = variant === '3d';
     const is3DSeam = variant === '3d_seam';
-    const is25D = variant === '2_5d' || variant === 'terrain';
 
     if (btnPrimary) btnPrimary.classList.toggle('active', variant === 'primary');
     if (btnAlt) btnAlt.classList.toggle('active', variant === 'alt');
+    if (btn25D) btn25D.classList.toggle('active', is25D);
     if (btn3D) btn3D.classList.toggle('active', is3D);
     if (btn3DSeam) btn3DSeam.classList.toggle('active', is3DSeam);
-    if (btn25D) btn25D.classList.toggle('active', is25D);
 
     if (currentModel) {
       scene.remove(currentModel);
