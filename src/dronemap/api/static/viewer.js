@@ -293,10 +293,18 @@ if (!canvas) {
       if (!child.userData.wireMaterial) {
         child.userData.wireMaterial = new THREE.MeshBasicMaterial({
           wireframe: true,
-          color: 0x0ea5e9,
+          color: 0xe2e8f0,
           depthTest: true,
         });
       }
+      if (activeShadingMode === 'semantic' || activeShadingMode === 'height') {
+        child.userData.wireMaterial.vertexColors = true;
+        child.userData.wireMaterial.color.setHex(0xffffff);
+      } else {
+        child.userData.wireMaterial.vertexColors = false;
+        child.userData.wireMaterial.color.setHex(0xe2e8f0);
+      }
+      child.userData.wireMaterial.needsUpdate = true;
       child.material = child.userData.wireMaterial;
     } else {
       child.material = child.userData.currentShadedMaterial || child.userData.originalMaterial;
