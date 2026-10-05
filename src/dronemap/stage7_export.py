@@ -555,19 +555,11 @@ def _despike_and_smooth_geometry(geom: "trimesh.Trimesh") -> None:
         pass
 
 
-def _write_glb(
-    obj_path: Path,
-    out_path: Path,
-    rotation: np.ndarray | None = None,
-    terrain_base_obj: Path | None = None,
-) -> dict:
+def _write_glb(obj_path: Path, out_path: Path, rotation: np.ndarray | None = None) -> dict:
     """Convert OBJ + MTL + textures to a single GLB binary.
 
     ``rotation`` (3x3, orthonormal) is applied to the vertices before export so
     the viewer receives a Y-up model; see ``_viewer_frame_transform``.
-
-    If ``terrain_base_obj`` is provided, it is added into the scene as a watertight
-    ground foundation, bridging all missing ground holes and voids.
     """
     try:
         import trimesh
@@ -575,18 +567,6 @@ def _write_glb(
         raise RuntimeError("trimesh is required for GLB export.") from exc
 
     scene = trimesh.load(str(obj_path), force="scene")
-
-    if (
-        terrain_base_obj is not None
-        and Path(terrain_base_obj).exists()
-        and Path(terrain_base_obj).resolve() != Path(obj_path).resolve()
-    ):
-        try:
-            s_base = trimesh.load(str(terrain_base_obj), force="scene")
-            for b_name, b_geom in s_base.geometry.items():
-                scene.add_geometry(b_geom, node_name="terrain_ground_base")
-        except Exception:
-            pass
 
     # Smooth out random peaks/corners and compute and bake vertex normals into every geometry.
     for geom in scene.geometry.values():
@@ -1633,9 +1613,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
         glb_path = export_dir / "model.glb"
         try:
             rotation, frame_info = _viewer_frame_transform(transform_info, ws=ws)
-            terrain_cand = ws.mesh_dir / "scene_dense_mesh_terrain_texture.obj"
-            t_base_path = terrain_cand if terrain_cand.exists() else None
-            frame_info.update(_write_glb(textured_obj, glb_path, rotation, terrain_base_obj=t_base_path))
+            frame_info.update(_write_glb(textured_obj, glb_path, rotation))
             ctx.output(model_glb=str(glb_path))
             ctx.metric(viewer_frame=frame_info)
             if frame_info.get("applied"):
@@ -1705,7 +1683,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             if obj_3d and Path(obj_3d).exists():
                 glb_3d = export_dir / "model_3d.glb"
                 try:
-                    _write_glb(Path(obj_3d), glb_3d, rotation, terrain_base_obj=t_base_path)
+                    _write_glb(Path(obj_3d), glb_3d, rotation)
                     ctx.output(model_3d_glb=str(glb_3d))
                 except Exception as e_3d:
                     ctx.note(f"3D GLB export note: {e_3d}")
