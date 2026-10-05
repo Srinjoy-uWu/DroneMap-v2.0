@@ -53,22 +53,22 @@ if (!canvas) {
   controls.maxDistance = 6000;
   controls.minDistance = 0.5;
 
-  // Balanced Photogrammetric Sun & Fill Lighting - avoids highlight blowout & bleached haze
-  const ambient = new THREE.AmbientLight(0xffffff, 0.65);
+  // Balanced Photogrammetric Sun & Fill Lighting - lifts dark shadows without highlight blowout
+  const ambient = new THREE.AmbientLight(0xffffff, 0.85);
   scene.add(ambient);
 
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.45);
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x334455, 0.55);
   scene.add(hemi);
 
-  const sun1 = new THREE.DirectionalLight(0xffffff, 0.85);
+  const sun1 = new THREE.DirectionalLight(0xffffff, 0.75);
   sun1.position.set(120, 220, 100);
   scene.add(sun1);
 
-  const sun2 = new THREE.DirectionalLight(0xffffff, 0.45);
+  const sun2 = new THREE.DirectionalLight(0xffffff, 0.40);
   sun2.position.set(-120, 160, -100);
   scene.add(sun2);
 
-  const underFill = new THREE.DirectionalLight(0xffffff, 0.25);
+  const underFill = new THREE.DirectionalLight(0xffffff, 0.35);
   underFill.position.set(0, -100, 0);
   scene.add(underFill);
 
