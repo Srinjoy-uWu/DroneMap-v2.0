@@ -35,8 +35,7 @@ if (!canvas) {
 } else try {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.enabled = false;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.0;
@@ -272,27 +271,9 @@ if (!canvas) {
   }
 
   function updateWireframeOverlay(child, isVisible) {
-    if (!child.isMesh || !child.geometry) return;
-    if (!child.userData.wireframeMesh) {
-      if (!child.geometry.userData.semanticColorAttr) {
-        computeDistinctionAttributes(child);
-      }
-      const wireMat = new THREE.MeshBasicMaterial({
-        wireframe: true,
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.92,
-        depthTest: true,
-        polygonOffset: true,
-        polygonOffsetFactor: -1,
-        polygonOffsetUnits: -2,
-      });
-      const wire = new THREE.Mesh(child.geometry, wireMat);
-      wire.renderOrder = 2;
-      child.add(wire);
-      child.userData.wireframeMesh = wire;
-    }
-    child.userData.wireframeMesh.visible = isVisible;
+    if (!child.isMesh || !child.material) return;
+    child.material.wireframe = isVisible;
+    child.material.needsUpdate = true;
   }
 
   // Shading Controller
@@ -315,13 +296,17 @@ if (!canvas) {
 
     if (!currentModel) return;
 
+    const isWire = chkWireframe ? chkWireframe.checked : false;
+
     currentModel.traverse((child) => {
       if (!child.isMesh || !child.material) return;
       const geom = child.geometry;
       if (!geom) return;
 
-      if (!geom.userData.semanticColorAttr || !geom.userData.heightColorAttr) {
-        computeDistinctionAttributes(child);
+      if (mode === 'semantic' || mode === 'height') {
+        if (!geom.userData.semanticColorAttr || !geom.userData.heightColorAttr) {
+          computeDistinctionAttributes(child);
+        }
       }
 
       if (mode === 'white') {
@@ -370,6 +355,7 @@ if (!canvas) {
           geom.setAttribute('color', geom.userData.originalColorAttr);
         }
       }
+      child.material.wireframe = isWire;
       child.material.needsUpdate = true;
     });
   }
@@ -477,13 +463,11 @@ if (!canvas) {
               child.userData.originalMaterial = child.material;
               child.userData.originalColor = child.material.color ? child.material.color.clone() : new THREE.Color(0xffffff);
               child.material.needsUpdate = true;
-            }
-            computeDistinctionAttributes(child);
             if (chkWireframe && chkWireframe.checked) {
               updateWireframeOverlay(child, true);
             }
-            child.castShadow = true;
-            child.receiveShadow = true;
+            child.castShadow = false;
+            child.receiveShadow = false;
           }
         });
 

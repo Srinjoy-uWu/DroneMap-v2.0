@@ -234,6 +234,126 @@ def plan_mesh_completion_with_ollama(
     return default_plan
 
 
+def fill_interior_boundary_holes(mesh: trimesh.Trimesh, max_hole_nodes: int = 2500) -> int:
+    """Detect and synthesize continuous 3D surface patches across interior mesh holes.
+
+    Identifies non-manifold / boundary loops that lie inside the flight perimeter,
+    synthesizes a conforming 2D Delaunay triangulation constrained to the boundary,
+    and interpolates heights smoothly from surrounding boundary nodes.
+    Returns the number of new patch faces added.
+    """
+    import collections
+    import networkx as nx
+    from matplotlib.path import Path
+    from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+    from scipy.spatial import Delaunay
+
+    if len(mesh.faces) < 16:
+        return 0
+
+    edges = mesh.edges_sorted
+    edge_counts = collections.Counter(tuple(e) for e in edges)
+    boundary_edges = [e for e, count in edge_counts.items() if count == 1]
+    if len(boundary_edges) < 6:
+        return 0
+
+    G = nx.Graph()
+    G.add_edges_from(boundary_edges)
+    comps = list(nx.connected_components(G))
+    if len(comps) <= 1:
+        return 0
+
+    def comp_span(c):
+        pts = mesh.vertices[list(c)]
+        return float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
+
+    comps_sorted = sorted(comps, key=comp_span, reverse=True)
+    interior_comps = comps_sorted[1:]
+
+    new_faces_total = 0
+    for hole_comp in interior_comps:
+        if len(hole_comp) < 3 or len(hole_comp) > max_hole_nodes:
+            continue
+
+        hole_subgraph = G.subgraph(hole_comp)
+        cycles = list(nx.cycle_basis(hole_subgraph))
+        loop_nodes = cycles[0] if cycles else list(nx.dfs_preorder_nodes(hole_subgraph))
+        boundary_pts = mesh.vertices[loop_nodes]
+
+        centroid = boundary_pts.mean(axis=0)
+        centered = boundary_pts - centroid
+        _, _, vt = np.linalg.svd(centered)
+        u_vec = vt[0]
+        v_vec = vt[1]
+        w_vec = vt[2]
+
+        u_boundary = np.dot(centered, u_vec)
+        v_boundary = np.dot(centered, v_vec)
+        w_boundary = np.dot(centered, w_vec)
+        pts_2d = np.column_stack([u_boundary, v_boundary])
+        poly_path = Path(pts_2d)
+
+        if len(loop_nodes) >= 8:
+            grid_res = min(40, max(12, int(np.sqrt(len(loop_nodes)) * 2.5)))
+            min_2d = pts_2d.min(axis=0)
+            max_2d = pts_2d.max(axis=0)
+            gx, gy = np.meshgrid(
+                np.linspace(min_2d[0], max_2d[0], grid_res),
+                np.linspace(min_2d[1], max_2d[1], grid_res),
+            )
+            grid_pts_2d = np.column_stack([gx.ravel(), gy.ravel()])
+            mask_inside = poly_path.contains_points(grid_pts_2d)
+            interior_pts_2d = grid_pts_2d[mask_inside]
+
+            interp_linear = LinearNDInterpolator(pts_2d, w_boundary)
+            interp_nearest = NearestNDInterpolator(pts_2d, w_boundary)
+            w_interior = interp_linear(interior_pts_2d)
+            nan_mask = np.isnan(w_interior)
+            if np.any(nan_mask):
+                w_interior[nan_mask] = interp_nearest(interior_pts_2d[nan_mask])
+
+            interior_pts_3d = (
+                centroid
+                + interior_pts_2d[:, 0:1] * u_vec
+                + interior_pts_2d[:, 1:2] * v_vec
+                + w_interior[:, None] * w_vec
+            )
+            all_pts_2d = np.vstack([pts_2d, interior_pts_2d])
+        else:
+            interior_pts_3d = np.empty((0, 3), dtype=np.float64)
+            all_pts_2d = pts_2d
+
+        tri = Delaunay(all_pts_2d)
+        tri_centers = all_pts_2d[tri.simplices].mean(axis=1)
+        inside_tris = poly_path.contains_points(tri_centers)
+        patch_faces_local = tri.simplices[inside_tris]
+        if len(patch_faces_local) == 0:
+            continue
+
+        n_orig_verts = len(mesh.vertices)
+        idx_map = {}
+        for i, orig_idx in enumerate(loop_nodes):
+            idx_map[i] = int(orig_idx)
+        for j in range(len(interior_pts_3d)):
+            idx_map[len(loop_nodes) + j] = int(n_orig_verts + j)
+
+        patch_faces = np.vectorize(idx_map.get)(patch_faces_local)
+
+        v0 = np.vstack([mesh.vertices, interior_pts_3d])[patch_faces[:, 0]]
+        v1 = np.vstack([mesh.vertices, interior_pts_3d])[patch_faces[:, 1]]
+        v2 = np.vstack([mesh.vertices, interior_pts_3d])[patch_faces[:, 2]]
+        fn = np.cross(v1 - v0, v2 - v0)
+        if np.mean(np.dot(fn, w_vec)) < 0:
+            patch_faces = np.fliplr(patch_faces)
+
+        if len(interior_pts_3d) > 0:
+            mesh.vertices = np.vstack([mesh.vertices, interior_pts_3d])
+        mesh.faces = np.vstack([mesh.faces, patch_faces])
+        new_faces_total += len(patch_faces)
+
+    return new_faces_total
+
+
 def repair_and_complete_openmvs_mesh(
     mesh: trimesh.Trimesh,
     dense_points: np.ndarray | None = None,
@@ -241,14 +361,16 @@ def repair_and_complete_openmvs_mesh(
     """Close holes, fix normals, and remove degenerate faces on a 3D OpenMVS mesh."""
     faces_before = len(mesh.faces)
     try:
-        mesh.remove_degenerate_faces()
-        mesh.remove_duplicate_faces()
+        nondegen = mesh.nondegenerate_faces()
+        if len(nondegen) < len(mesh.faces):
+            mesh.update_faces(nondegen)
         mesh.remove_unreferenced_vertices()
+        fill_interior_boundary_holes(mesh)
         trimesh.repair.fix_winding(mesh)
         trimesh.repair.fix_normals(mesh)
         trimesh.repair.fill_holes(mesh)
     except Exception as exc:
-        logger.debug("Trimesh hole repair note: %s", exc)
+        logger.warning("Trimesh hole repair note: %s", exc)
     return {
         "faces_before_repair": int(faces_before),
         "faces_after_repair": int(len(mesh.faces)),
