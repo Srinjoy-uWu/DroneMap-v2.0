@@ -555,11 +555,18 @@ def _despike_and_smooth_geometry(geom: "trimesh.Trimesh") -> None:
         pass
 
 
-def _write_glb(obj_path: Path, out_path: Path, rotation: np.ndarray | None = None) -> dict:
+def _write_glb(
+    obj_path: Path,
+    out_path: Path,
+    rotation: np.ndarray | None = None,
+    bedding_obj_path: Path | None = None,
+) -> dict:
     """Convert OBJ + MTL + textures to a single GLB binary.
 
     ``rotation`` (3x3, orthonormal) is applied to the vertices before export so
     the viewer receives a Y-up model; see ``_viewer_frame_transform``.
+    If ``bedding_obj_path`` is provided, it is added as a ground floor geometry
+    underneath the 3D structure to close tree canopy and structural occlusions.
     """
     try:
         import trimesh
@@ -577,6 +584,15 @@ def _write_glb(obj_path: Path, out_path: Path, rotation: np.ndarray | None = Non
                 _ = np.asarray(geom.vertex_normals)
         except Exception:
             pass  # If computation fails, export without normals; viewer computes them.
+
+    # Optional continuous bare-earth terrain bedding underneath 3D structures
+    if bedding_obj_path is not None and Path(bedding_obj_path).exists():
+        try:
+            bedding_scene = trimesh.load(str(bedding_obj_path), force="scene")
+            for b_name, b_geom in bedding_scene.geometry.items():
+                scene.add_geometry(b_geom, node_name=f"bedding_{b_name}")
+        except Exception:
+            pass
 
     if rotation is not None:
         matrix = np.eye(4)
@@ -617,6 +633,13 @@ def _write_glb(obj_path: Path, out_path: Path, rotation: np.ndarray | None = Non
                 _bake_into_scene(scene, shift_flip)
     except Exception:
         pass
+
+    # If ground bedding was included, translate it downward by 0.08m in viewer frame (-Y)
+    # so that on open terrain the 3D surface stays on top with no z-fighting, while
+    # occluded tree cavities and eaves rest on solid ground texture.
+    for name, geom in scene.geometry.items():
+        if "bedding" in name and hasattr(geom, "apply_translation"):
+            geom.apply_translation([0.0, -0.08, 0.0])
 
     scene.export(str(out_path))
 
@@ -1611,9 +1634,15 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
     # ------------------------------------------------------------------
     if cfg.mesh_glb and textured_obj is not None:
         glb_path = export_dir / "model.glb"
+        obj_2_5d = ws.stage("mesh").outputs.get("textured_obj_2_5d")
+        bedding_path = Path(obj_2_5d) if obj_2_5d and Path(obj_2_5d).exists() else None
+
         try:
             rotation, frame_info = _viewer_frame_transform(transform_info, ws=ws)
-            frame_info.update(_write_glb(textured_obj, glb_path, rotation))
+            # When the primary model is the 3D reconstruction, include terrain bedding to eliminate tree/building occlusions
+            is_3d_primary = ws.stage("mesh").outputs.get("textured_obj_3d") == str(textured_obj)
+            bedding_for_primary = bedding_path if is_3d_primary else None
+            frame_info.update(_write_glb(textured_obj, glb_path, rotation, bedding_obj_path=bedding_for_primary))
             ctx.output(model_glb=str(glb_path))
             ctx.metric(viewer_frame=frame_info)
             if frame_info.get("applied"):
@@ -1662,7 +1691,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             if obj_seam and Path(obj_seam).exists():
                 glb_seam = export_dir / "model_3d_seam.glb"
                 try:
-                    _write_glb(Path(obj_seam), glb_seam, rotation)
+                    _write_glb(Path(obj_seam), glb_seam, rotation, bedding_obj_path=bedding_path)
                     ctx.output(model_3d_seam_glb=str(glb_seam))
                     ctx.note(
                         "exported seam-levelled 3D mesh as model_3d_seam.glb for side-by-side comparison"
@@ -1670,7 +1699,6 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
                 except Exception as e_seam:
                     ctx.note(f"seam-levelled GLB export note: {e_seam}")
 
-            obj_2_5d = ws.stage("mesh").outputs.get("textured_obj_2_5d")
             if obj_2_5d and Path(obj_2_5d).exists():
                 glb_2_5d = export_dir / "model_2_5d.glb"
                 try:
@@ -1683,7 +1711,7 @@ def run(ws: "RunWorkspace", config: "Config", tools: "ToolRegistry", ctx: "_Stag
             if obj_3d and Path(obj_3d).exists():
                 glb_3d = export_dir / "model_3d.glb"
                 try:
-                    _write_glb(Path(obj_3d), glb_3d, rotation)
+                    _write_glb(Path(obj_3d), glb_3d, rotation, bedding_obj_path=bedding_path)
                     ctx.output(model_3d_glb=str(glb_3d))
                 except Exception as e_3d:
                     ctx.note(f"3D GLB export note: {e_3d}")

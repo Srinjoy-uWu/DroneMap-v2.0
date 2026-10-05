@@ -133,17 +133,19 @@ if (!canvas) {
   const gltfLoader = new GLTFLoader();
 
   // Feature Distinction Attribute Generator:
-  // Computes per-vertex semantic classification and Turbo elevation colors
+  // Computes per-vertex semantic classification and Turbo elevation colors with direct typed-array access
   function computeDistinctionAttributes(child) {
     const geom = child.geometry;
     if (!geom || !geom.attributes.position) return;
     const pos = geom.attributes.position;
     const count = pos.count;
+    const posArr = pos.array;
 
     if (!geom.attributes.normal) {
       geom.computeVertexNormals();
     }
     const norm = geom.attributes.normal;
+    const normArr = norm ? norm.array : null;
 
     geom.computeBoundingBox();
     const box = geom.boundingBox;
@@ -155,7 +157,7 @@ if (!canvas) {
     // Compute robust Y percentile span (p02 to p98) to avoid compression from outlier floaters
     const sampleStep = Math.max(1, Math.floor(count / 1500));
     const sampleY = [];
-    for (let i = 0; i < count; i += sampleStep) sampleY.push(pos.getY(i));
+    for (let i = 0; i < count; i += sampleStep) sampleY.push(posArr[i * 3 + 1]);
     sampleY.sort((a, b) => a - b);
     const p02 = sampleY[Math.floor(sampleY.length * 0.02)] ?? minY;
     const p98 = sampleY[Math.floor(sampleY.length * 0.98)] ?? maxY;
@@ -176,10 +178,12 @@ if (!canvas) {
     // Coarse 2D grid to compute local ground datum
     const gridRes = 40;
     const groundCells = Array.from({ length: gridRes * gridRes }, () => []);
-    for (let i = 0; i < count; i += Math.max(1, Math.floor(count / 15000))) {
-      const x = pos.getX(i);
-      const y = pos.getY(i);
-      const z = pos.getZ(i);
+    const sampleGridStep = Math.max(1, Math.floor(count / 15000));
+    for (let i = 0; i < count; i += sampleGridStep) {
+      const idx3 = i * 3;
+      const x = posArr[idx3];
+      const y = posArr[idx3 + 1];
+      const z = posArr[idx3 + 2];
       const gx = Math.max(0, Math.min(gridRes - 1, Math.floor(((x - box.min.x) / spanX) * gridRes)));
       const gz = Math.max(0, Math.min(gridRes - 1, Math.floor(((z - box.min.z) / spanZ) * gridRes)));
       groundCells[gz * gridRes + gx].push(y);
@@ -220,19 +224,20 @@ if (!canvas) {
     }
 
     for (let i = 0; i < count; i++) {
-      const x = pos.getX(i);
-      const y = pos.getY(i);
-      const z = pos.getZ(i);
-      const nx = norm.getX(i);
-      const ny = norm.getY(i);
-      const nz = norm.getZ(i);
+      const idx3 = i * 3;
+      const x = posArr[idx3];
+      const y = posArr[idx3 + 1];
+      const z = posArr[idx3 + 2];
+      const nx = normArr ? normArr[idx3] : 0;
+      const ny = normArr ? normArr[idx3 + 1] : 1;
+      const nz = normArr ? normArr[idx3 + 2] : 0;
 
       // 1. Height map colors (absolute normalized elevation)
       const normY = (y - p02) / robustSpanY;
       const [hr, hg, hb] = turboRGB(normY);
-      heightColors[i * 3] = hr;
-      heightColors[i * 3 + 1] = hg;
-      heightColors[i * 3 + 2] = hb;
+      heightColors[idx3] = hr;
+      heightColors[idx3 + 1] = hg;
+      heightColors[idx3 + 2] = hb;
 
       // 2. Semantic feature distinction (relative height above local ground)
       const gx = Math.max(0, Math.min(gridRes - 1, Math.floor(((x - box.min.x) / spanX) * gridRes)));
@@ -261,20 +266,41 @@ if (!canvas) {
         sr = 0.85; sg = 0.47; sb = 0.02;
       }
 
-      semanticColors[i * 3] = sr;
-      semanticColors[i * 3 + 1] = sg;
-      semanticColors[i * 3 + 2] = sb;
+      semanticColors[idx3] = sr;
+      semanticColors[idx3 + 1] = sg;
+      semanticColors[idx3 + 2] = sb;
     }
 
-    geom.userData.heightColorAttr = new THREE.BufferAttribute(heightColors, 3);
-    geom.userData.semanticColorAttr = new THREE.BufferAttribute(semanticColors, 3);
-    geom.userData.originalColorAttr = geom.attributes.color ? geom.attributes.color.clone() : null;
+    geom.userData.heightColors = heightColors;
+    geom.userData.semanticColors = semanticColors;
+    geom.userData.originalColorArray = geom.attributes.color ? geom.attributes.color.array.slice() : null;
+  }
+
+  function updateMeshColors(geom, colorArray) {
+    if (!geom) return;
+    if (!geom.attributes.color) {
+      geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(geom.attributes.position.count * 3), 3));
+    }
+    if (colorArray) {
+      geom.attributes.color.copyArray(colorArray);
+      geom.attributes.color.needsUpdate = true;
+    }
   }
 
   function updateWireframeOverlay(child, isVisible) {
-    if (!child.isMesh || !child.material) return;
-    child.material.wireframe = isVisible;
-    child.material.needsUpdate = true;
+    if (!child.isMesh) return;
+    if (isVisible) {
+      if (!child.userData.wireMaterial) {
+        child.userData.wireMaterial = new THREE.MeshBasicMaterial({
+          wireframe: true,
+          color: 0x0ea5e9,
+          depthTest: true,
+        });
+      }
+      child.material = child.userData.wireMaterial;
+    } else {
+      child.material = child.userData.currentShadedMaterial || child.userData.originalMaterial;
+    }
   }
 
   // Shading Controller
@@ -305,7 +331,7 @@ if (!canvas) {
       if (!geom) return;
 
       if (mode === 'semantic' || mode === 'height') {
-        if (!geom.userData.semanticColorAttr || !geom.userData.heightColorAttr) {
+        if (!geom.userData.semanticColors || !geom.userData.heightColors) {
           computeDistinctionAttributes(child);
         }
       }
@@ -319,7 +345,7 @@ if (!canvas) {
             side: THREE.DoubleSide,
           });
         }
-        child.material = child.userData.clayMaterial;
+        child.userData.currentShadedMaterial = child.userData.clayMaterial;
       } else if (mode === 'semantic') {
         if (!child.userData.distinctMaterial) {
           child.userData.distinctMaterial = new THREE.MeshStandardMaterial({
@@ -329,11 +355,8 @@ if (!canvas) {
             side: THREE.DoubleSide,
           });
         }
-        if (geom.userData.semanticColorAttr) {
-          geom.setAttribute('color', geom.userData.semanticColorAttr);
-          geom.attributes.color.needsUpdate = true;
-        }
-        child.material = child.userData.distinctMaterial;
+        updateMeshColors(geom, geom.userData.semanticColors);
+        child.userData.currentShadedMaterial = child.userData.distinctMaterial;
       } else if (mode === 'height') {
         if (!child.userData.distinctMaterial) {
           child.userData.distinctMaterial = new THREE.MeshStandardMaterial({
@@ -343,21 +366,23 @@ if (!canvas) {
             side: THREE.DoubleSide,
           });
         }
-        if (geom.userData.heightColorAttr) {
-          geom.setAttribute('color', geom.userData.heightColorAttr);
+        updateMeshColors(geom, geom.userData.heightColors);
+        child.userData.currentShadedMaterial = child.userData.distinctMaterial;
+      } else if (mode === 'textured') {
+        if (geom && geom.userData.originalColorArray) {
+          updateMeshColors(geom, geom.userData.originalColorArray);
+        } else if (geom && geom.attributes.color) {
+          geom.attributes.color.array.fill(1.0);
           geom.attributes.color.needsUpdate = true;
         }
-        child.material = child.userData.distinctMaterial;
-      } else if (mode === 'textured') {
-        if (child.userData.originalMaterial) {
-          child.material = child.userData.originalMaterial;
-        }
-        if (geom && geom.userData.originalColorAttr) {
-          geom.setAttribute('color', geom.userData.originalColorAttr);
-        }
+        child.userData.currentShadedMaterial = child.userData.originalMaterial;
       }
-      child.material.wireframe = isWire;
-      child.material.needsUpdate = true;
+
+      if (isWire) {
+        updateWireframeOverlay(child, true);
+      } else {
+        child.material = child.userData.currentShadedMaterial;
+      }
     });
   }
 
@@ -462,6 +487,7 @@ if (!canvas) {
                 child.userData.originalMap = child.material.map;
               }
               child.userData.originalMaterial = child.material;
+              child.userData.currentShadedMaterial = child.material;
               child.userData.originalColor = child.material.color ? child.material.color.clone() : new THREE.Color(0xffffff);
               child.material.needsUpdate = true;
             }

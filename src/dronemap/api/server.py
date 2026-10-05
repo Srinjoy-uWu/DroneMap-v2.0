@@ -417,12 +417,20 @@ def get_report(run_id: str) -> JSONResponse:
     return JSONResponse(m.get("accuracy", {}))
 
 
+NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.api_route("/api/runs/{run_id}/model.glb", methods=["GET", "HEAD"])
 def get_model_glb(run_id: str) -> FileResponse:
     return FileResponse(
         str(_export_file(run_id, "model.glb")),
         media_type="model/gltf-binary",
         filename="model.glb",
+        headers=NO_CACHE_HEADERS,
     )
 
 
@@ -433,6 +441,7 @@ def get_model_alt_glb(run_id: str) -> FileResponse:
         str(_export_file(run_id, "model_alt.glb")),
         media_type="model/gltf-binary",
         filename="model_alt.glb",
+        headers=NO_CACHE_HEADERS,
     )
 
 
@@ -447,6 +456,7 @@ def get_model_2_5d_glb(run_id: str) -> FileResponse:
         str(target),
         media_type="model/gltf-binary",
         filename="model_2_5d.glb",
+        headers=NO_CACHE_HEADERS,
     )
 
 
@@ -460,6 +470,7 @@ def get_model_3d_glb(run_id: str) -> FileResponse:
         str(target),
         media_type="model/gltf-binary",
         filename="model_3d.glb",
+        headers=NO_CACHE_HEADERS,
     )
 
 
@@ -475,6 +486,7 @@ def get_model_3d_seam_glb(run_id: str) -> FileResponse:
         str(target),
         media_type="model/gltf-binary",
         filename="model_3d_seam.glb",
+        headers=NO_CACHE_HEADERS,
     )
 
 
