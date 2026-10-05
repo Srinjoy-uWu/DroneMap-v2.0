@@ -464,6 +464,7 @@ if (!canvas) {
               child.userData.originalMaterial = child.material;
               child.userData.originalColor = child.material.color ? child.material.color.clone() : new THREE.Color(0xffffff);
               child.material.needsUpdate = true;
+            }
             if (chkWireframe && chkWireframe.checked) {
               updateWireframeOverlay(child, true);
             }
